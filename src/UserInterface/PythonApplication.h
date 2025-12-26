@@ -151,6 +151,10 @@ class CPythonApplication : public CMSApplication, public CInputKeyboard, public 
 		void Exit();
 		void Abort();
 
+		bool IsUserMovingMainWindow() const;
+		void SetUserMovingMainWindow(bool flag);
+		void UpdateMainWindowPosition();
+
 		void SetMinFog(float fMinFog);
 		void SetFrameSkip(bool isEnable);
 		void SkipRenderBuffering(DWORD dwSleepMSec);
@@ -436,6 +440,8 @@ class CPythonApplication : public CMSApplication, public CInputKeyboard, public 
 		int							m_iForceSightRange;
 
 	protected:
+		bool m_IsMovingMainWindow;
+		POINT m_InitialMouseMovingPoint;
 		int m_iCursorNum;
 		int m_iContinuousCursorNum;
 };

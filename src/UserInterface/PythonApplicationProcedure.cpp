@@ -79,6 +79,11 @@ LRESULT CPythonApplication::WindowProcedure(HWND hWnd, UINT uiMsg, WPARAM wParam
 					{
 						__MinimizeFullScreenWindow(hWnd, m_dwWidth, m_dwHeight);
 					}
+
+					if (IsUserMovingMainWindow())
+					{
+						SetUserMovingMainWindow(false);
+					}
 				}
 			}
 			break;
@@ -112,6 +117,8 @@ LRESULT CPythonApplication::WindowProcedure(HWND hWnd, UINT uiMsg, WPARAM wParam
 			break;
 
 		case WM_KEYDOWN:
+			if (wParam == VK_ESCAPE && IsUserMovingMainWindow())
+				SetUserMovingMainWindow(false);
 			OnIMEKeyDown(LOWORD(wParam));
 			break;
 
@@ -135,6 +142,9 @@ LRESULT CPythonApplication::WindowProcedure(HWND hWnd, UINT uiMsg, WPARAM wParam
 
 			s_xDownPosition = LOWORD(lParam);
 			s_yDownPosition = HIWORD(lParam);
+
+			if (IsUserMovingMainWindow())
+				SetUserMovingMainWindow(false);
 			return 0;
 
 		case WM_LBUTTONUP:
@@ -225,7 +235,45 @@ LRESULT CPythonApplication::WindowProcedure(HWND hWnd, UINT uiMsg, WPARAM wParam
 				OnSizeChange(short(LOWORD(lParam)), short(HIWORD(lParam)));
 			}
 			break; 
-
+		case WM_NCLBUTTONDOWN:
+			{
+				switch (wParam)
+				{
+				case HTMAXBUTTON:
+				case HTSYSMENU:
+					return 0;
+				case HTMINBUTTON:
+					ShowWindow(hWnd, SW_MINIMIZE);
+					return 0;
+				case HTCLOSE:
+					RunPressExitKey();
+					return 0;
+				case HTCAPTION:
+					if (!IsUserMovingMainWindow())
+						SetUserMovingMainWindow(true);
+		
+					return 0;
+				}
+		
+				break;
+			}
+			
+		case WM_NCLBUTTONUP:
+			{
+				if (IsUserMovingMainWindow())
+					SetUserMovingMainWindow(false);
+				
+				break;
+			}
+		
+		case WM_NCRBUTTONDOWN:
+		case WM_NCRBUTTONUP:
+		case WM_CONTEXTMENU:
+			return 0;
+		case WM_SYSCOMMAND:
+			if (wParam == SC_KEYMENU)
+				return 0;
+			break;
 		case WM_SYSKEYDOWN:
 			switch (LOWORD(wParam))
 			{

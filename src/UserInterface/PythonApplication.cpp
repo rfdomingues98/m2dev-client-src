@@ -39,7 +39,8 @@ m_dwFaceCount(0),
 m_fGlobalTime(0.0f),
 m_fGlobalElapsedTime(0.0f),
 m_dwLButtonDownTime(0),
-m_dwLastIdleTime(0)
+m_dwLastIdleTime(0),
+m_IsMovingMainWindow(false)
 {
 #ifndef _DEBUG
 	SetEterExceptionHandler();
@@ -92,6 +93,8 @@ m_dwLastIdleTime(0)
 	m_iForceSightRange = -1;
 
 	CCameraManager::Instance().AddCamera(EVENT_CAMERA_NUMBER);
+
+	m_InitialMouseMovingPoint = {};
 }
 
 CPythonApplication::~CPythonApplication()
@@ -806,10 +809,42 @@ bool CPythonApplication::CreateDevice(int width, int height, int Windowed, int b
 	}
 }
 
+void CPythonApplication::SetUserMovingMainWindow(bool flag)
+{
+	if (flag && !GetCursorPos(&m_InitialMouseMovingPoint))
+		return;
+
+	m_IsMovingMainWindow = flag;
+}
+
+bool CPythonApplication::IsUserMovingMainWindow() const
+{
+	return m_IsMovingMainWindow;
+}
+
+void CPythonApplication::UpdateMainWindowPosition()
+{
+	POINT finalPoint{};
+	if (GetCursorPos(&finalPoint))
+	{
+		LONG xDiff = finalPoint.x - m_InitialMouseMovingPoint.x;
+		LONG yDiff = finalPoint.y - m_InitialMouseMovingPoint.y;
+
+		RECT r{};
+		GetWindowRect(&r);
+
+		SetPosition(r.left + xDiff, r.top + yDiff);
+		m_InitialMouseMovingPoint = finalPoint;
+	}
+}
+
 void CPythonApplication::Loop()
 {	
 	while (1)
 	{	
+		if (IsUserMovingMainWindow())
+			UpdateMainWindowPosition();
+		
 		if (IsMessage())
 		{
 			if (!MessageProcess())
