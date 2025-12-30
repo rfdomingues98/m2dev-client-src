@@ -2,6 +2,7 @@
 #include "PythonChat.h"
 #include "PythonItem.h"
 #include "GameLib/ItemManager.h"
+#include <shellapi.h>
 
 PyObject * chatSetChatColor(PyObject* poSelf, PyObject* poArgs)
 {
@@ -471,8 +472,43 @@ PyObject * chatGetLinkFromHyperlink(PyObject * poSelf, PyObject * poArgs)
 			return Py_BuildValue("s", buf);
 		}
 	}
+	// url:http://example.com
+	else if (0 == results[0].compare("url"))
+	{
+		if (results.size() < 2)
+			return Py_BuildValue("s", "");
+
+		// Reconstruct the URL (it may contain colons)
+		std::string url = results[1];
+		for (size_t i = 2; i < results.size(); ++i)
+		{
+			url += ":";
+			url += results[i];
+		}
+
+		char buf[2048] = { 0 };
+		// Create a clickable URL hyperlink with blue color
+		snprintf(buf, sizeof(buf), "|cff00aaff|Hurl:%s|h[%s]|h|r", url.c_str(), url.c_str());
+		return Py_BuildValue("s", buf);
+	}
 
 	return Py_BuildValue("s", "");
+}
+
+PyObject * chatOpenURL(PyObject * poSelf, PyObject * poArgs)
+{
+	char * szURL;
+	
+	if (!PyTuple_GetString(poArgs, 0, &szURL))
+		return Py_BuildException();
+
+	// Open URL in default browser using ShellExecute
+	HINSTANCE hResult = ShellExecuteA(NULL, "open", szURL, NULL, NULL, SW_SHOWNORMAL);
+	
+	if (reinterpret_cast<int>(hResult) > 32)
+		return Py_BuildValue("i", 1); // Success
+	else
+		return Py_BuildValue("i", 0); // Failure
 }
 
 void initChat()
@@ -522,6 +558,7 @@ void initChat()
 
 		// Link
 		{ "GetLinkFromHyperlink",	chatGetLinkFromHyperlink,	METH_VARARGS },
+		{ "OpenURL",				chatOpenURL,				METH_VARARGS },
 
 		{ NULL,						NULL,						NULL },
 	};
