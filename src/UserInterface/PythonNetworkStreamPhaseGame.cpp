@@ -1183,6 +1183,93 @@ bool CPythonNetworkStream::SendUseSkillPacket(DWORD dwSkillIndex, DWORD dwTarget
 	return SendSequence();
 }
 
+// Helper function to check if character is a valid URL character
+static bool IsValidURLChar(char c)
+{
+	return (c >= 'a' && c <= 'z') || 
+		   (c >= 'A' && c <= 'Z') || 
+		   (c >= '0' && c <= '9') ||
+		   c == '.' || c == '/' || c == ':' || c == '?' || c == '&' || 
+		   c == '=' || c == '%' || c == '-' || c == '_' || c == '~' ||
+		   c == '+' || c == '#' || c == '@' || c == '!';
+}
+
+// Helper function to find end of URL
+static size_t FindURLEnd(const std::string& text, size_t start)
+{
+	size_t pos = start;
+	while (pos < text.length() && IsValidURLChar(text[pos]))
+	{
+		pos++;
+	}
+	return pos;
+}
+
+// Helper function to convert URLs to hyperlinks
+static std::string ConvertURLsToHyperlinks(const char* text)
+{
+	std::string result(text);
+	std::string output;
+	output.reserve(result.length() * 2); // Reserve space for potential expansion
+	
+	size_t pos = 0;
+	
+	while (pos < result.length())
+	{
+		bool foundURL = false;
+		size_t urlStart = pos;
+		size_t urlEnd = pos;
+		
+		// Check for http:// or https://
+		if (result.length() - pos >= 7 && 
+			(result.substr(pos, 7) == "http://" || result.substr(pos, 8) == "https://"))
+		{
+			foundURL = true;
+			urlStart = pos;
+			urlEnd = FindURLEnd(result, pos);
+		}
+		// Check for www.
+		else if (result.length() - pos >= 4 && result.substr(pos, 4) == "www.")
+		{
+			foundURL = true;
+			urlStart = pos;
+			urlEnd = FindURLEnd(result, pos);
+		}
+		
+		if (foundURL && urlEnd > urlStart)
+		{
+			// Add text before URL
+			if (urlStart > pos)
+				output += result.substr(pos, urlStart - pos);
+			
+			// Extract URL
+			std::string url = result.substr(urlStart, urlEnd - urlStart);
+			std::string displayUrl = url;
+			
+			// Add http:// if missing
+			if (url.find("http://") != 0 && url.find("https://") != 0)
+			{
+				url = "http://" + url;
+			}
+			
+			// Create hyperlink format: |cff00aaff|Hurl:http://example.com|h[example.com]|h|r
+			char hyperlink[2048];
+			snprintf(hyperlink, sizeof(hyperlink), "|cff00aaff|Hurl:%s|h[%s]|h|r", url.c_str(), displayUrl.c_str());
+			output += hyperlink;
+			
+			pos = urlEnd;
+		}
+		else
+		{
+			// No URL found, add character and continue
+			output += result[pos];
+			pos++;
+		}
+	}
+	
+	return output;
+}
+
 bool CPythonNetworkStream::SendChatPacket(const char * c_szChat, BYTE byType)
 {
 	if (strlen(c_szChat) == 0)
@@ -1207,7 +1294,11 @@ bool CPythonNetworkStream::SendChatPacket(const char * c_szChat, BYTE byType)
 	if (ClientCommand(c_szChat))
 		return true;
 
-	int iTextLen = strlen(c_szChat) + 1;
+	// Convert URLs to hyperlinks before sending
+	std::string convertedChat = ConvertURLsToHyperlinks(c_szChat);
+	const char* chatToSend = convertedChat.c_str();
+	
+	int iTextLen = strlen(chatToSend) + 1;
 	TPacketCGChat ChatPacket;
 	ChatPacket.header = HEADER_CG_CHAT;
 	ChatPacket.length = sizeof(ChatPacket) + iTextLen;
@@ -1216,7 +1307,7 @@ bool CPythonNetworkStream::SendChatPacket(const char * c_szChat, BYTE byType)
 	if (!Send(sizeof(ChatPacket), &ChatPacket))
 		return false;
 
-	if (!Send(iTextLen, c_szChat))
+	if (!Send(iTextLen, chatToSend))
 		return false;
 
 	return SendSequence();
