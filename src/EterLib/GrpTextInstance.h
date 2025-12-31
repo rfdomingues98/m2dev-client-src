@@ -62,6 +62,7 @@ class CGraphicTextInstance
 		void SetTextPointer(CGraphicText* pText);
 		void SetValueString(const std::string& c_stValue);
 		void SetValue(const char* c_szValue, size_t len = -1);
+		void SetChatValue(const char* c_szName, const char* c_szMessage); // Chat-specific setter with name/message separation
 		void SetPosition(float fx, float fy, float fz = 0.0f);
 		void SetSecret(bool Value);
 		void SetOutline(bool Value);
@@ -131,6 +132,9 @@ class CGraphicTextInstance
 		bool m_isUpdate;
 		bool m_isUpdateFontTexture;
 		bool m_computedRTL;  // Result of BiDi analysis (used when m_direction == Auto)
+		bool m_isChatMessage;  // True if this text was set via SetChatValue (has separated name/message)
+		std::string m_chatName;  // Chat sender name (only used when m_isChatMessage is true)
+		std::string m_chatMessage;  // Chat message text (only used when m_isChatMessage is true)
 
 		CGraphicText::TRef m_roText;
 		CGraphicFontTexture::TPCharacterInfomationVector m_pCharInfoVector;

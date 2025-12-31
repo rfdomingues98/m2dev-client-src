@@ -135,11 +135,37 @@ void CGraphicTextInstance::Update()
 
 	// UTF-8 -> UTF-16 conversion - reserve enough space to avoid reallocation
 	std::vector<wchar_t> wTextBuf((size_t)utf8Len + 1u, 0);
-	const int wTextLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, utf8Len, wTextBuf.data(), (int)wTextBuf.size());
+	int wTextLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, utf8Len, wTextBuf.data(), (int)wTextBuf.size());
+
+	// If strict UTF-8 conversion fails, try lenient mode (replaces invalid sequences)
 	if (wTextLen <= 0)
 	{
-		ResetState();
-		return;
+		DWORD dwError = GetLastError();
+		BIDI_LOG("GrpTextInstance::Update() - STRICT UTF-8 conversion failed (error %u), trying LENIENT mode", dwError);
+		BIDI_LOG("  Text length: %d bytes", utf8Len);
+		BIDI_LOG("  First 32 bytes (hex): %02X %02X %02X %02X %02X %02X %02X %02X...",
+			(utf8Len > 0 ? (unsigned char)utf8[0] : 0),
+			(utf8Len > 1 ? (unsigned char)utf8[1] : 0),
+			(utf8Len > 2 ? (unsigned char)utf8[2] : 0),
+			(utf8Len > 3 ? (unsigned char)utf8[3] : 0),
+			(utf8Len > 4 ? (unsigned char)utf8[4] : 0),
+			(utf8Len > 5 ? (unsigned char)utf8[5] : 0),
+			(utf8Len > 6 ? (unsigned char)utf8[6] : 0),
+			(utf8Len > 7 ? (unsigned char)utf8[7] : 0));
+		BIDI_LOG("  Text preview: %.64s", utf8);
+
+		// Try lenient conversion (no MB_ERR_INVALID_CHARS flag)
+		// This will replace invalid UTF-8 sequences with default character
+		wTextLen = MultiByteToWideChar(CP_UTF8, 0, utf8, utf8Len, wTextBuf.data(), (int)wTextBuf.size());
+
+		if (wTextLen <= 0)
+		{
+			BIDI_LOG("  LENIENT conversion also failed! Text cannot be displayed.");
+			ResetState();
+			return;
+		}
+
+		BIDI_LOG("  LENIENT conversion succeeded - text will display with replacement characters");
 	}
 
 
@@ -244,38 +270,57 @@ void CGraphicTextInstance::Update()
 			m_visualToLogicalPos[i] = i;
 		}
 
-		// Check for RTL characters and chat message format in single pass
-		bool hasRTL = false;
-		bool isChatMessage = false;
-		const wchar_t* wTextPtr = wTextBuf.data();
-
-		for (int i = 0; i < wTextLen; ++i)
+		// Use optimized chat message processing if SetChatValue was used
+		if (m_isChatMessage && !m_chatName.empty() && !m_chatMessage.empty())
 		{
-			if (!hasRTL && IsRTLCodepoint(wTextPtr[i]))
-				hasRTL = true;
+			// Convert chat name and message to wide chars
+			std::wstring wName = Utf8ToWide(m_chatName);
+			std::wstring wMsg = Utf8ToWide(m_chatMessage);
 
-			if (!isChatMessage && i < wTextLen - 2 &&
-			    wTextPtr[i] == L' ' && wTextPtr[i + 1] == L':' && wTextPtr[i + 2] == L' ')
-				isChatMessage = true;
+			// Use BuildVisualChatMessage for proper BiDi handling
+			std::vector<wchar_t> visual = BuildVisualChatMessage(
+				wName.data(), (int)wName.size(),
+				wMsg.data(), (int)wMsg.size(),
+				baseRTL);
 
-			// Early exit if both found
-			if (hasRTL && isChatMessage)
-				break;
-		}
-
-		// Apply BiDi if text contains RTL OR is a chat message in RTL UI
-		// Skip BiDi for regular input text like :)) in RTL UI
-		if (hasRTL || (baseRTL && isChatMessage))
-		{
-			std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(wTextBuf.data(), wTextLen, baseRTL);
 			for (size_t i = 0; i < visual.size(); ++i)
 				__DrawCharacter(pFontTexture, visual[i], defaultColor);
 		}
 		else
 		{
-			// Pure LTR text or non-chat input - no BiDi processing
+			// Legacy path: Check for RTL characters and chat message format in single pass
+			bool hasRTL = false;
+			bool isChatMessage = false;
+			const wchar_t* wTextPtr = wTextBuf.data();
+
 			for (int i = 0; i < wTextLen; ++i)
-				__DrawCharacter(pFontTexture, wTextBuf[i], defaultColor);
+			{
+				if (!hasRTL && IsRTLCodepoint(wTextPtr[i]))
+					hasRTL = true;
+
+				if (!isChatMessage && i < wTextLen - 2 &&
+				    wTextPtr[i] == L' ' && wTextPtr[i + 1] == L':' && wTextPtr[i + 2] == L' ')
+					isChatMessage = true;
+
+				// Early exit if both found
+				if (hasRTL && isChatMessage)
+					break;
+			}
+
+			// Apply BiDi if text contains RTL OR is a chat message in RTL UI
+			// Skip BiDi for regular input text like :)) in RTL UI
+			if (hasRTL || (baseRTL && isChatMessage))
+			{
+				std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(wTextBuf.data(), wTextLen, baseRTL);
+				for (size_t i = 0; i < visual.size(); ++i)
+					__DrawCharacter(pFontTexture, visual[i], defaultColor);
+			}
+			else
+			{
+				// Pure LTR text or non-chat input - no BiDi processing
+				for (int i = 0; i < wTextLen; ++i)
+					__DrawCharacter(pFontTexture, wTextBuf[i], defaultColor);
+			}
 		}
 	}
 	// ========================================================================
@@ -283,6 +328,37 @@ void CGraphicTextInstance::Update()
 	// ========================================================================
 	else
 	{
+		// Special handling for chat messages with tags (e.g., hyperlinks)
+		// We need to process the message separately and then combine with name
+		std::wstring chatNameWide;
+		bool isChatWithTags = false;
+
+		if (m_isChatMessage && !m_chatName.empty() && !m_chatMessage.empty())
+		{
+			isChatWithTags = true;
+			chatNameWide = Utf8ToWide(m_chatName);
+
+			// Process only the message part (not the full text)
+			const char* msgUtf8 = m_chatMessage.c_str();
+			const int msgUtf8Len = (int)m_chatMessage.size();
+
+			// Re-convert to wide chars for message only
+			wTextBuf.clear();
+			wTextBuf.resize((size_t)msgUtf8Len + 1u, 0);
+			wTextLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, msgUtf8, msgUtf8Len, wTextBuf.data(), (int)wTextBuf.size());
+
+			if (wTextLen <= 0)
+			{
+				// Try lenient conversion
+				wTextLen = MultiByteToWideChar(CP_UTF8, 0, msgUtf8, msgUtf8Len, wTextBuf.data(), (int)wTextBuf.size());
+				if (wTextLen <= 0)
+				{
+					ResetState();
+					return;
+				}
+			}
+		}
+
 		// Check if text contains RTL characters (cache pointer for performance)
 		bool hasRTL = false;
 		const wchar_t* wTextPtr = wTextBuf.data();
@@ -302,7 +378,7 @@ void CGraphicTextInstance::Update()
 			int logicalPos;  // logical index in original wTextBuf (includes tags)
 		};
 
-		auto ReorderTaggedWithBidi = [&](std::vector<TVisChar>& vis, bool forceRTL)
+		auto ReorderTaggedWithBidi = [&](std::vector<TVisChar>& vis, bool forceRTL, bool isHyperlink, bool shapeOnly = false)
 		{
 			if (vis.empty())
 				return;
@@ -313,7 +389,71 @@ void CGraphicTextInstance::Update()
 			for (const auto& vc : vis)
 				buf.push_back(vc.ch);
 
-			// Use the exact same BiDi engine as tagless text
+			// Special handling for hyperlinks: extract content between [ and ], apply BiDi, then re-add brackets
+			if (isHyperlink && buf.size() > 2)
+			{
+				// Find opening and closing brackets
+				int openIdx = -1, closeIdx = -1;
+				for (int i = 0; i < (int)buf.size(); ++i)
+				{
+					if (buf[i] == L'[' && openIdx < 0) openIdx = i;
+					if (buf[i] == L']' && closeIdx < 0) closeIdx = i;
+				}
+
+				// If we have valid brackets, process content between them
+				if (openIdx >= 0 && closeIdx > openIdx)
+				{
+					// Extract content (without brackets)
+					std::vector<wchar_t> content(buf.begin() + openIdx + 1, buf.begin() + closeIdx);
+
+					// Apply BiDi to content with LTR base (keeps +9 at end)
+					std::vector<wchar_t> contentVisual = BuildVisualBidiText_Tagless(content.data(), (int)content.size(), false);
+
+					// Rebuild: everything before '[', then '[', then processed content, then ']', then everything after
+					std::vector<wchar_t> visual;
+					visual.reserve(buf.size() + contentVisual.size());
+
+					// Copy prefix (before '[')
+					visual.insert(visual.end(), buf.begin(), buf.begin() + openIdx);
+
+					// Add opening bracket
+					visual.push_back(L'[');
+
+					// Add processed content
+					visual.insert(visual.end(), contentVisual.begin(), contentVisual.end());
+
+					// Add closing bracket
+					visual.push_back(L']');
+
+					// Copy suffix (after ']')
+					visual.insert(visual.end(), buf.begin() + closeIdx + 1, buf.end());
+
+					// Handle size change due to Arabic shaping
+					if ((int)visual.size() != (int)vis.size())
+					{
+						std::vector<TVisChar> resized;
+						resized.reserve(visual.size());
+
+						for (size_t i = 0; i < visual.size(); ++i)
+						{
+							size_t src = (i < vis.size()) ? i : (vis.size() - 1);
+							TVisChar tmp = vis[src];
+							tmp.ch = visual[i];
+							resized.push_back(tmp);
+						}
+						vis.swap(resized);
+					}
+					else
+					{
+						// Same size: write back characters
+						for (size_t i = 0; i < vis.size(); ++i)
+							vis[i].ch = visual[i];
+					}
+					return;
+				}
+			}
+
+			// Non-hyperlink or no brackets found: use normal BiDi processing
 			std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(buf.data(), (int)buf.size(), forceRTL);
 
 			// If size differs (rare, but can happen with Arabic shaping expansion),
@@ -434,7 +574,10 @@ void CGraphicTextInstance::Update()
 		// ====================================================================
 		// PHASE 2: Apply BiDi to hyperlinks (if RTL text or RTL UI)
 		// ====================================================================
-		if (hasRTL || baseRTL)
+		// DISABLED: Hyperlinks are pre-formatted and stored in visual order
+		// Applying BiDi to them reverses text that's already correct
+		// This section is kept for reference but should not execute
+		if (false)
 		{
 			// Collect all hyperlink ranges (reserve typical count)
 			struct LinkRange { int start; int end; int linkIdx; };
@@ -578,8 +721,13 @@ void CGraphicTextInstance::Update()
 			}
 		}
 
-		// Apply BiDi to non-hyperlink segments and reorder segments for RTL UI
-		if (hasRTL || baseRTL)
+		// Apply BiDi to segments - always process hyperlinks, optionally process other text
+		// For input fields: only process hyperlinks (preserve cursor for regular text)
+		// For display text: process everything and reorder segments
+		const bool hasHyperlinks = !linkTargets.empty();
+		const bool shouldProcessBidi = (hasRTL || baseRTL) && (!m_isCursor || hasHyperlinks);
+
+		if (shouldProcessBidi)
 		{
 			// Split text into hyperlink and non-hyperlink segments (reserve typical count)
 			const size_t estimatedSegments = linkTargets.size() * 2 + 1;
@@ -609,21 +757,32 @@ void CGraphicTextInstance::Update()
 				}
 			}
 
-			// Apply BiDi to non-hyperlink segments only (cache segment count)
+			// Apply BiDi to segments
+			// For input fields: skip non-hyperlink segments to preserve cursor
+			// For display text: process all segments
 			const size_t numSegments = segments.size();
 			for (size_t s = 0; s < numSegments; ++s)
 			{
-				if (!isHyperlink[s])
-					ReorderTaggedWithBidi(segments[s], baseRTL);
+				// Skip non-hyperlink segments in input fields to preserve cursor
+				if (m_isCursor && !isHyperlink[s])
+					continue;
+
+				ReorderTaggedWithBidi(segments[s], baseRTL, isHyperlink[s], false);
 			}
 
-			// Rebuild text from segments (reverse order for RTL UI)
+			// Rebuild text from segments
 			logicalVis.clear();
 			logicalVis.reserve(logicalVisSize2); // Reserve original size
 
-			if (baseRTL)
+			// IMPORTANT: Only reverse segments for display text, NOT for input fields
+			// Input fields need to preserve logical order for proper cursor positioning
+			// Display text (received chat messages) can reverse for better RTL reading flow
+			const bool shouldReverseSegments = baseRTL && !m_isCursor;
+
+			if (shouldReverseSegments)
 			{
-				// RTL UI - reverse segments for right-to-left reading
+				// RTL display text - reverse segments for right-to-left reading
+				// Example: "Hello [link]" becomes "[link] Hello" visually
 				for (int s = (int)numSegments - 1; s >= 0; --s)
 				{
 					logicalVis.insert(logicalVis.end(), segments[s].begin(), segments[s].end());
@@ -631,7 +790,8 @@ void CGraphicTextInstance::Update()
 			}
 			else
 			{
-				// LTR UI - keep original segment order
+				// LTR UI or input field - keep original segment order
+				// Input fields must preserve logical order for cursor to work correctly
 				for (size_t s = 0; s < numSegments; ++s)
 				{
 					logicalVis.insert(logicalVis.end(), segments[s].begin(), segments[s].end());
@@ -690,6 +850,18 @@ void CGraphicTextInstance::Update()
 		curLinkRange.sx = 0;
 		curLinkRange.ex = 0;
 
+		// For LTR chat messages with tags, render name and separator first
+		if (isChatWithTags && !chatNameWide.empty() && !baseRTL)
+		{
+			// LTR UI: "Name : Message"
+			for (size_t i = 0; i < chatNameWide.size(); ++i)
+				x += __DrawCharacter(pFontTexture, chatNameWide[i], defaultColor);
+			x += __DrawCharacter(pFontTexture, L' ', defaultColor);
+			x += __DrawCharacter(pFontTexture, L':', defaultColor);
+			x += __DrawCharacter(pFontTexture, L' ', defaultColor);
+		}
+		// For RTL, we'll append name AFTER the message (see below)
+
 		// Cache size for loop (avoid repeated size() calls)
 		const size_t logicalVisRenderSize = logicalVis.size();
 		for (size_t idx = 0; idx < logicalVisRenderSize; ++idx)
@@ -732,6 +904,19 @@ void CGraphicTextInstance::Update()
 		{
 			curLinkRange.text = linkTargets[(size_t)currentLink];
 			m_hyperlinkVector.push_back(curLinkRange);
+		}
+
+		// Add chat name and separator for RTL messages with tags
+		if (isChatWithTags && !chatNameWide.empty() && baseRTL)
+		{
+			// RTL UI: "Message : Name" (render order matches BuildVisualChatMessage)
+			// Message was already rendered above, now append separator and name
+			// When RTL-aligned, this produces visual: [item] on right, name on left
+			__DrawCharacter(pFontTexture, L' ', defaultColor);
+			__DrawCharacter(pFontTexture, L':', defaultColor);
+			__DrawCharacter(pFontTexture, L' ', defaultColor);
+			for (size_t i = 0; i < chatNameWide.size(); ++i)
+				__DrawCharacter(pFontTexture, chatNameWide[i], defaultColor);
 		}
 	}
 
@@ -1090,38 +1275,7 @@ void CGraphicTextInstance::Render(RECT * pClipRect)
 			continue;
 
 		STATEMANAGER.SetTexture(0, pTexture);
-
-		// Each character is 4 vertices forming a quad (0=TL, 1=BL, 2=TR, 3=BR)
-		// We need to convert quads to triangle list format
-		// Triangle list needs 6 vertices per quad: v0,v1,v2, v2,v1,v3
-
-		size_t numQuads = vtxBatch.size() / 4;
-		std::vector<SVertex> triangleVerts;
-		triangleVerts.reserve(numQuads * 6);
-
-		for (size_t i = 0; i < numQuads; ++i)
-		{
-			size_t baseIdx = i * 4;
-			const SVertex& v0 = vtxBatch[baseIdx + 0]; // TL
-			const SVertex& v1 = vtxBatch[baseIdx + 1]; // BL
-			const SVertex& v2 = vtxBatch[baseIdx + 2]; // TR
-			const SVertex& v3 = vtxBatch[baseIdx + 3]; // BR
-
-			// First triangle: TL, BL, TR
-			triangleVerts.push_back(v0);
-			triangleVerts.push_back(v1);
-			triangleVerts.push_back(v2);
-
-			// Second triangle: TR, BL, BR
-			triangleVerts.push_back(v2);
-			triangleVerts.push_back(v1);
-			triangleVerts.push_back(v3);
-		}
-
-		if (!triangleVerts.empty())
-		{
-			STATEMANAGER.DrawPrimitiveUP(D3DPT_TRIANGLELIST, triangleVerts.size() / 3, triangleVerts.data(), sizeof(SVertex));
-		}
+		STATEMANAGER.DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, vtxBatch.size() - 2, vtxBatch.data(), sizeof(SVertex));
 	}
 
 	if (m_isCursor)
@@ -1392,6 +1546,23 @@ void CGraphicTextInstance::SetValue(const char* c_szText, size_t len)
 		return;
 
 	m_stText = c_szText;
+	m_isChatMessage = false; // Reset chat mode
+	m_isUpdate = false;
+}
+
+void CGraphicTextInstance::SetChatValue(const char* c_szName, const char* c_szMessage)
+{
+	if (!c_szName || !c_szMessage)
+		return;
+
+	// Store separated components
+	m_chatName = c_szName;
+	m_chatMessage = c_szMessage;
+	m_isChatMessage = true;
+
+	// Build combined text for rendering (will be processed by Update())
+	// Use BuildVisualChatMessage in Update() instead of BuildVisualBidiText_Tagless
+	m_stText = std::string(c_szName) + " : " + std::string(c_szMessage);
 	m_isUpdate = false;
 }
 
@@ -1525,6 +1696,9 @@ void CGraphicTextInstance::__Initialize()
 	// Only chat messages should be explicitly set to RTL
 	m_direction = ETextDirection::Auto;
 	m_computedRTL = false;
+	m_isChatMessage = false;
+	m_chatName = "";
+	m_chatMessage = "";
 
 	m_textWidth = 0;
 	m_textHeight = 0;

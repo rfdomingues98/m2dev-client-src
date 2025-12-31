@@ -2116,7 +2116,6 @@ void CInstanceBase::SetStateFlags(DWORD dwStateFlags)
 	// MR-4: Fix PK Mode Bug
 	// Prevent killer mode for same-guild attacks in GUILD PK mode
 	bool skipKiller = false;
-				   
 
 	if ((dwStateFlags & ADD_CHARACTER_STATE_KILLER) && PK_MODE_GUILD == GetPKMode()) {
 		CPythonPlayer& rkPlayer = CPythonPlayer::Instance();
@@ -2225,6 +2224,7 @@ bool CInstanceBase::IsAttackableInstance(CInstanceBase& rkInstVictim)
 						return false;
 				}
 			}
+
 			if (PK_MODE_GUILD == GetPKMode())
 				if (GetGuildID() == rkInstVictim.GetGuildID())
 					return false;
@@ -2255,6 +2255,9 @@ bool CInstanceBase::IsAttackableInstance(CInstanceBase& rkInstVictim)
 				if (IsPVPInstance(rkInstVictim))
 					return true;
 
+				if (rkInstVictim.GetPKMode() == PK_MODE_PROTECT)
+					return false;
+
 				// MR-4: Fix PK Mode Bug
 				if (PK_MODE_REVENGE == GetPKMode())
 				{
@@ -2262,12 +2265,13 @@ bool CInstanceBase::IsAttackableInstance(CInstanceBase& rkInstVictim)
 					{
 						if (
 							(GetGuildID() == 0 || GetGuildID() != rkInstVictim.GetGuildID()) &&
-							IsConflictAlignmentInstance(rkInstVictim) &&
 							rkInstVictim.GetAlignment() < 0
 						)
 							return true;
 					}
 				}
+
+				return false;
 				// MR-4: -- END OF -- Fix PK Mode Bug
 			}
 			else

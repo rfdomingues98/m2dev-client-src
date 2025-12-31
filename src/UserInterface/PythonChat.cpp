@@ -499,9 +499,27 @@ void CPythonChat::AppendChat(int iType, const char * c_szChat)
 	SChatLine * pChatLine = SChatLine::New();
 	pChatLine->iType = iType;
 
-	// Pass chat text as-is to BiDi algorithm
-	// BuildVisualBidiText_Tagless will detect chat format and handle reordering
-	pChatLine->Instance.SetValue(c_szChat);
+	// Parse chat format "name : message" for proper BiDi handling
+	// This avoids issues with usernames containing " : "
+	const char* colonPos = strstr(c_szChat, " : ");
+	if (colonPos && colonPos != c_szChat) // Make sure " : " is not at the start
+	{
+		// Extract name and message
+		size_t nameLen = colonPos - c_szChat;
+		const char* msgStart = colonPos + 3; // Skip " : "
+
+		// Create temporary buffers
+		std::string name(c_szChat, nameLen);
+		std::string message(msgStart);
+
+		// Use new SetChatValue API for proper BiDi handling
+		pChatLine->Instance.SetChatValue(name.c_str(), message.c_str());
+	}
+	else
+	{
+		// Fallback: Not in chat format (INFO, NOTICE, etc.)
+		pChatLine->Instance.SetValue(c_szChat);
+	}
 
 	if (IsRTL())
 	{
@@ -768,9 +786,23 @@ void CWhisper::AppendChat(int iType, const char * c_szChat)
 
 	SChatLine * pChatLine = SChatLine::New();
 
-	// Pass chat text as-is to BiDi algorithm
-	// BuildVisualBidiText_Tagless will detect chat format and handle reordering
-	pChatLine->Instance.SetValue(c_szChat);
+	// Parse chat format "name : message" for proper BiDi handling
+	const char* colonPos = strstr(c_szChat, " : ");
+	if (colonPos && colonPos != c_szChat)
+	{
+		// Extract name and message
+		size_t nameLen = colonPos - c_szChat;
+		const char* msgStart = colonPos + 3;
+
+		std::string name(c_szChat, nameLen);
+		std::string message(msgStart);
+
+		pChatLine->Instance.SetChatValue(name.c_str(), message.c_str());
+	}
+	else
+	{
+		pChatLine->Instance.SetValue(c_szChat);
+	}
 
 	if (IsRTL())
 	{

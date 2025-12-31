@@ -22,9 +22,11 @@ constexpr size_t ARABIC_SHAPING_EXPANSION_FACTOR_RETRY = 4;
 constexpr size_t ARABIC_SHAPING_SAFETY_MARGIN_RETRY = 64;
 
 // ============================================================================
-// DEBUG LOGGING (Uncomment to enable BiDi debugging)
+// DEBUG LOGGING (Only enabled in Debug builds)
 // ============================================================================
-// #define DEBUG_BIDI
+#ifdef _DEBUG
+	#define DEBUG_BIDI  // Enabled in debug builds for diagnostics
+#endif
 
 #ifdef DEBUG_BIDI
 	#include <cstdio>
@@ -242,8 +244,9 @@ static inline bool IsNameTokenPunct(wchar_t ch)
 		case L'\\':
 		case L'(':
 		case L')':
-		case L'[':
-		case L']':
+		// Brackets are handled specially - see GetCharDirSmart
+		// case L'[':
+		// case L']':
 		case L'{':
 		case L'}':
 		case L'<':
@@ -264,16 +267,44 @@ static inline bool IsStrongLTR(wchar_t ch)
 
 static inline bool HasStrongLTRNeighbor(const wchar_t* s, int n, int i)
 {
-	// Remove null/size check (caller guarantees validity)
-	// Early exit after first strong neighbor found
+	// Skip neutral characters (spaces, punctuation) to find nearest strong character
+	// This fixes mixed-direction text like "english + arabic"
 
-	// Check previous character
-	if (i > 0 && IsStrongLTR(s[i - 1]))
-		return true;
+	// Search backwards for strong character (skip neutrals/whitespace)
+	for (int j = i - 1; j >= 0; --j)
+	{
+		wchar_t ch = s[j];
 
-	// Check next character
-	if (i + 1 < n && IsStrongLTR(s[i + 1]))
-		return true;
+		// Skip spaces and common neutral punctuation
+		if (ch == L' ' || ch == L'\t' || ch == L'\n')
+			continue;
+
+		// Found strong LTR
+		if (IsStrongLTR(ch))
+			return true;
+
+		// Found strong RTL or other strong character
+		if (IsRTLCodepoint(ch) || IsStrongAlpha(ch))
+			break;
+	}
+
+	// Search forwards for strong character (skip neutrals/whitespace)
+	for (int j = i + 1; j < n; ++j)
+	{
+		wchar_t ch = s[j];
+
+		// Skip spaces and common neutral punctuation
+		if (ch == L' ' || ch == L'\t' || ch == L'\n')
+			continue;
+
+		// Found strong LTR
+		if (IsStrongLTR(ch))
+			return true;
+
+		// Found strong RTL or other strong character
+		if (IsRTLCodepoint(ch) || IsStrongAlpha(ch))
+			break;
+	}
 
 	return false;
 }
@@ -302,6 +333,132 @@ static inline ECharDir GetCharDirSmart(const wchar_t* s, int n, int i)
 	if (IsStrongLTR(ch))
 		return ECharDir::LTR;
 
+	// Parentheses: always LTR to keep them with their content
+	if (ch == L'(' || ch == L')')
+		return ECharDir::LTR;
+
+	// Percentage sign: attach to numbers (scan nearby for digits/minus/plus)
+	// Handles: "%20", "20%", "-6%", "%d%%", etc.
+	if (ch == L'%')
+	{
+		// Look backward for digit, %, -, or +
+		for (int j = i - 1; j >= 0 && (i - j) < 5; --j)
+		{
+			wchar_t prev = s[j];
+			if (IsDigit(prev) || prev == L'%' || prev == L'-' || prev == L'+')
+				return ECharDir::LTR;
+			if (prev != L' ' && prev != L'\t')
+				break; // Stop if we hit non-numeric character
+		}
+		// Look forward for digit, %, -, or +
+		for (int j = i + 1; j < n && (j - i) < 5; ++j)
+		{
+			wchar_t next = s[j];
+			if (IsDigit(next) || next == L'%' || next == L'-' || next == L'+')
+				return ECharDir::LTR;
+			if (next != L' ' && next != L'\t')
+				break; // Stop if we hit non-numeric character
+		}
+		return ECharDir::Neutral;
+	}
+
+	// Minus/dash: attach to numbers (scan nearby for digits/%)
+	// Handles: "-6", "5-10", "-6%%", etc.
+	if (ch == L'-')
+	{
+		// Look backward for digit or %
+		for (int j = i - 1; j >= 0 && (i - j) < 3; --j)
+		{
+			wchar_t prev = s[j];
+			if (IsDigit(prev) || prev == L'%')
+				return ECharDir::LTR;
+			if (prev != L' ' && prev != L'\t')
+				break;
+		}
+		// Look forward for digit or %
+		for (int j = i + 1; j < n && (j - i) < 3; ++j)
+		{
+			wchar_t next = s[j];
+			if (IsDigit(next) || next == L'%')
+				return ECharDir::LTR;
+			if (next != L' ' && next != L'\t')
+				break;
+		}
+		return ECharDir::Neutral;
+	}
+
+	// Colon: attach to preceding text direction
+	// Look backward to find strong character
+	if (ch == L':')
+	{
+		for (int j = i - 1; j >= 0; --j)
+		{
+			if (s[j] == L' ' || s[j] == L'\t')
+				continue; // Skip spaces
+			if (IsRTLCodepoint(s[j]))
+				return ECharDir::RTL; // Attach to RTL text
+			if (IsStrongLTR(s[j]))
+				return ECharDir::LTR; // Attach to LTR text
+		}
+		return ECharDir::Neutral;
+	}
+
+	// Enhancement marker: '+' followed by digit(s) should attach to preceding text
+	// If preceded by RTL, treat as RTL to keep "+9" with the item name
+	// Otherwise treat as LTR
+	if (ch == L'+' && i + 1 < n && IsDigit(s[i + 1]))
+	{
+		// Look backward for the last strong character
+		for (int j = i - 1; j >= 0; --j)
+		{
+			if (IsRTLCodepoint(s[j]))
+				return ECharDir::RTL; // Attach to preceding RTL text
+			if (IsStrongLTR(s[j]))
+				return ECharDir::LTR; // Attach to preceding LTR text
+			// Skip neutral characters
+		}
+		return ECharDir::LTR; // Default to LTR if no strong character found
+	}
+
+	// Brackets: always attach to the content inside them
+	// This fixes hyperlinks like "[درع فولاذي أسود+9]"
+	if (ch == L'[' || ch == L']')
+	{
+		// Opening bracket '[': look forward for strong character
+		if (ch == L'[')
+		{
+			for (int j = i + 1; j < n; ++j)
+			{
+				wchar_t next = s[j];
+				if (next == L']') break; // End of bracket content
+				if (IsRTLCodepoint(next)) return ECharDir::RTL;
+				if (IsStrongLTR(next)) return ECharDir::LTR;
+			}
+		}
+		// Closing bracket ']': look backward for strong character
+		else if (ch == L']')
+		{
+			for (int j = i - 1; j >= 0; --j)
+			{
+				wchar_t prev = s[j];
+				if (prev == L'[') break; // Start of bracket content
+				if (IsRTLCodepoint(prev)) return ECharDir::RTL;
+				if (IsStrongLTR(prev)) return ECharDir::LTR;
+			}
+		}
+		// If we can't determine, treat as neutral
+		return ECharDir::Neutral;
+	}
+
+	// Spaces should attach to adjacent strong characters to avoid fragmentation
+	// This fixes "english + arabic" by keeping " + " with "english"
+	if (ch == L' ' || ch == L'\t')
+	{
+		if (HasStrongLTRNeighbor(s, n, i))
+			return ECharDir::LTR;
+		// Note: We don't check for RTL neighbor because ResolveNeutralDir handles that
+	}
+
 	// Name-token punctuation: if adjacent to LTR, treat as LTR to keep token intact
 	if (IsNameTokenPunct(ch) && HasStrongLTRNeighbor(s, n, i))
 		return ECharDir::LTR;
@@ -318,10 +475,11 @@ struct TStrongDirCache
 	TStrongDirCache(const wchar_t* s, int n, EBidiDir base) : nextStrong(n), baseDir(base)
 	{
 		// Build reverse lookup: scan from end to beginning
+		// Use GetCharDirSmart for context-aware character classification
 		EBidiDir lastSeen = baseDir;
 		for (int i = n - 1; i >= 0; --i)
 		{
-			ECharDir cd = GetCharDir(s[i]);
+			ECharDir cd = GetCharDirSmart(s, n, i);
 			if (cd == ECharDir::LTR)
 				lastSeen = EBidiDir::LTR;
 			else if (cd == ECharDir::RTL)
@@ -397,66 +555,6 @@ static std::vector<wchar_t> BuildVisualBidiText_Tagless(const wchar_t* s, int n,
 	if (!s || n <= 0)
 		return {};
 
-	// Detect chat format "name : msg" and extract components
-	int chatSepPos = -1;
-	for (int i = 0; i < n - 2; ++i)
-	{
-		if (s[i] == L' ' && s[i + 1] == L':' && s[i + 2] == L' ')
-		{
-			chatSepPos = i;
-			break;
-		}
-	}
-
-	// If chat format detected, process name and message separately
-	if (chatSepPos > 0 && forceRTL)
-	{
-		// Use pointers instead of copying (zero-copy optimization)
-		const wchar_t* name = s;
-		const int nameLen = chatSepPos;
-
-		const int msgStart = chatSepPos + 3;
-		const wchar_t* msg = s + msgStart;
-		const int msgLen = n - msgStart;
-
-		// Check if message contains RTL
-		bool msgHasRTL = false;
-		for (int i = 0; i < msgLen; ++i)
-		{
-			if (IsRTLCodepoint(msg[i]))
-			{
-				msgHasRTL = true;
-				break;
-			}
-		}
-
-		// Build result based on message direction (pre-reserve exact size)
-		std::vector<wchar_t> visual;
-		visual.reserve((size_t)n);
-
-		if (msgHasRTL)
-		{
-			// Arabic message: apply BiDi to message, then add " : name"
-			std::vector<wchar_t> msgVisual = BuildVisualBidiText_Tagless(msg, msgLen, false);
-			visual.insert(visual.end(), msgVisual.begin(), msgVisual.end());
-			visual.push_back(L' ');
-			visual.push_back(L':');
-			visual.push_back(L' ');
-			visual.insert(visual.end(), name, name + nameLen); // Direct pointer insert
-		}
-		else
-		{
-			// English message: "msg : name"
-			visual.insert(visual.end(), msg, msg + msgLen); // Direct pointer insert
-			visual.push_back(L' ');
-			visual.push_back(L':');
-			visual.push_back(L' ');
-			visual.insert(visual.end(), name, name + nameLen); // Direct pointer insert
-		}
-
-		return visual;
-	}
-
 	// 1) base direction
 	EBidiDir base = forceRTL ? EBidiDir::RTL : DetectBaseDir_FirstStrong(s, n);
 
@@ -503,6 +601,16 @@ static std::vector<wchar_t> BuildVisualBidiText_Tagless(const wchar_t* s, int n,
 			d = ResolveNeutralDir(s, n, i, base, lastStrong, &strongCache);
 		}
 
+#ifdef DEBUG_BIDI
+		if (i < 50) // Only log first 50 chars to avoid spam
+		{
+			BIDI_LOG("Char[%d] U+%04X '%lc' → CharDir=%s, RunDir=%s",
+				i, (unsigned int)ch, (ch >= 32 && ch < 127) ? ch : L'?',
+				cd == ECharDir::RTL ? "RTL" : (cd == ECharDir::LTR ? "LTR" : "Neutral"),
+				d == EBidiDir::RTL ? "RTL" : "LTR");
+		}
+#endif
+
 		push_run(d);
 		runs.back().text.push_back(ch);
 	}
@@ -528,7 +636,13 @@ static std::vector<wchar_t> BuildVisualBidiText_Tagless(const wchar_t* s, int n,
 		int outLen = Arabic_MakeShape(r.text.data(), (int)r.text.size(), shaped.data(), (int)shaped.size());
 		if (outLen <= 0)
 		{
-			BIDI_LOG("Arabic_MakeShape failed for run of %zu chars", r.text.size());
+			BIDI_LOG("Arabic_MakeShape FAILED for RTL run of %zu characters", r.text.size());
+			BIDI_LOG("  WARNING: This RTL text segment will NOT be displayed!");
+			BIDI_LOG("  First few characters: U+%04X U+%04X U+%04X U+%04X",
+				r.text.size() > 0 ? (unsigned int)r.text[0] : 0,
+				r.text.size() > 1 ? (unsigned int)r.text[1] : 0,
+				r.text.size() > 2 ? (unsigned int)r.text[2] : 0,
+				r.text.size() > 3 ? (unsigned int)r.text[3] : 0);
 			continue;
 		}
 
@@ -579,6 +693,95 @@ static std::vector<wchar_t> BuildVisualBidiText_Tagless(const wchar_t* s, int n,
 	{
 		for (int i = (int)runs.size() - 1; i >= 0; --i)
 			emit_run(runs[(size_t)i]);
+	}
+
+	return visual;
+}
+
+// ============================================================================
+// Chat Message BiDi Processing (Separate name/message handling)
+// ============================================================================
+
+// Build visual BiDi text for chat messages with separate name and message
+// This avoids fragile " : " detection and handles cases where username contains " : "
+//
+// RECOMMENDED USAGE:
+//   Instead of: SetValue("PlayerName : Message")
+//   Use this function with separated components:
+//     - name: "PlayerName" (without " : ")
+//     - msg: "Message" (without " : ")
+//
+// INTEGRATION NOTES:
+//   To use this properly, you need to:
+//   1. Modify the server/network code to send chat name and message separately
+//   2. Or parse the chat string in PythonNetworkStreamPhaseGame.cpp BEFORE passing to GrpTextInstance
+//   3. Then call this function instead of BuildVisualBidiText_Tagless
+//
+static inline std::vector<wchar_t> BuildVisualChatMessage(
+	const wchar_t* name, int nameLen,
+	const wchar_t* msg, int msgLen,
+	bool forceRTL)
+{
+	if (!name || !msg || nameLen <= 0 || msgLen <= 0)
+		return {};
+
+	// Check if message contains RTL or hyperlink tags
+	bool msgHasRTL = false;
+	bool msgHasTags = false;
+	for (int i = 0; i < msgLen; ++i)
+	{
+		if (IsRTLCodepoint(msg[i]))
+			msgHasRTL = true;
+		if (msg[i] == L'|')
+			msgHasTags = true;
+		if (msgHasRTL && msgHasTags)
+			break;
+	}
+
+	// Build result based on UI direction (pre-reserve exact size)
+	std::vector<wchar_t> visual;
+	visual.reserve((size_t)(nameLen + msgLen + 3)); // +3 for " : "
+
+	// Decision: UI direction determines order (for visual consistency)
+	// RTL UI: "Message : Name" (message on right, consistent with RTL reading flow)
+	// LTR UI: "Name : Message" (name on left, consistent with LTR reading flow)
+	if (forceRTL)
+	{
+		// RTL UI: "Message : Name"
+		// Don't apply BiDi if message has tags (hyperlinks are pre-formatted)
+		if (msgHasTags)
+		{
+			visual.insert(visual.end(), msg, msg + msgLen);
+		}
+		else
+		{
+			// Apply BiDi to message based on its content
+			std::vector<wchar_t> msgVisual = BuildVisualBidiText_Tagless(msg, msgLen, msgHasRTL);
+			visual.insert(visual.end(), msgVisual.begin(), msgVisual.end());
+		}
+		visual.push_back(L' ');
+		visual.push_back(L':');
+		visual.push_back(L' ');
+		visual.insert(visual.end(), name, name + nameLen); // Name on left side
+	}
+	else
+	{
+		// LTR UI: "Name : Message"
+		visual.insert(visual.end(), name, name + nameLen); // Name on left side
+		visual.push_back(L' ');
+		visual.push_back(L':');
+		visual.push_back(L' ');
+		// Don't apply BiDi if message has tags (hyperlinks are pre-formatted)
+		if (msgHasTags)
+		{
+			visual.insert(visual.end(), msg, msg + msgLen);
+		}
+		else
+		{
+			// Apply BiDi to message based on its content
+			std::vector<wchar_t> msgVisual = BuildVisualBidiText_Tagless(msg, msgLen, msgHasRTL);
+			visual.insert(visual.end(), msgVisual.begin(), msgVisual.end());
+		}
 	}
 
 	return visual;

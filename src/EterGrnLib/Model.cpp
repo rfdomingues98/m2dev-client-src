@@ -257,7 +257,7 @@ BOOL CGrannyModel::CheckMeshIndex(int iIndex) const
 {
 	if (iIndex < 0)
 		return FALSE;
-	if (iIndex >= m_meshNodeSize)
+	if (iIndex >= GetMeshCount())
 		return FALSE;
 
 	return TRUE;
