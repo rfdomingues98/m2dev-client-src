@@ -849,7 +849,9 @@ bool CPythonNetworkStream::RecvSpecialEffect()
 		case SE_EQUIP_LOVE_PENDANT:
 			effect = CInstanceBase::EFFECT_LOVE_PENDANT_EQUIP;
 			break;
-
+		case SE_AGGREGATE_MONSTER:
+			effect = CInstanceBase::EFFECT_AGGREGATE_MONSTER;
+			break;
 		
 		default:
 			TraceError("%d 는 없는 스페셜 이펙트 번호입니다.TPacketGCSpecialEffect",kSpecialEffect.type);

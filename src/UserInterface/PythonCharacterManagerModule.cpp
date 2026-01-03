@@ -841,4 +841,5 @@ void initchrmgr()
 	PyModule_AddIntConstant(poModule, "EFFECT_HAPPINESS_RING_EQUIP",		CInstanceBase::EFFECT_HAPPINESS_RING_EQUIP);
 	PyModule_AddIntConstant(poModule, "EFFECT_LOVE_PENDANT_EQUIP",		CInstanceBase::EFFECT_LOVE_PENDANT_EQUIP);
 	
+	PyModule_AddIntConstant(poModule, "EFFECT_AGGREGATE_MONSTER",			CInstanceBase::EFFECT_AGGREGATE_MONSTER);
 }
