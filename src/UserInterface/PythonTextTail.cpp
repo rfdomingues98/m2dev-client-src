@@ -11,6 +11,7 @@
 #include "MarkManager.h"
 
 #include <utf8.h>
+// EPlaceDir and TextTailBiDi() template are defined in utf8.h
 
 const D3DXCOLOR c_TextTail_Player_Color = D3DXCOLOR(1.0f, 1.0f, 1.0f, 1.0f);
 const D3DXCOLOR c_TextTail_Monster_Color = D3DXCOLOR(1.0f, 0.0f, 0.0f, 1.0f);

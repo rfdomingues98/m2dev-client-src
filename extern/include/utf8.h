@@ -337,6 +337,12 @@ static inline ECharDir GetCharDirSmart(const wchar_t* s, int n, int i)
 	if (ch == L'(' || ch == L')')
 		return ECharDir::LTR;
 
+	// Common punctuation: treat as strong LTR to prevent jumping around in mixed text
+	// This makes "Hello + اختبار" and "اختبار + Hello" both keep punctuation in place
+	if (ch == L'+' || ch == L'-' || ch == L'=' || ch == L'*' || ch == L'/' ||
+	    ch == L'<' || ch == L'>' || ch == L'&' || ch == L'|' || ch == L'@' || ch == L'#')
+		return ECharDir::LTR;
+
 	// Percentage sign: attach to numbers (scan nearby for digits/minus/plus)
 	// Handles: "%20", "20%", "-6%", "%d%%", etc.
 	if (ch == L'%')
@@ -755,8 +761,9 @@ static inline std::vector<wchar_t> BuildVisualChatMessage(
 		}
 		else
 		{
-			// Apply BiDi to message based on its content
-			std::vector<wchar_t> msgVisual = BuildVisualBidiText_Tagless(msg, msgLen, msgHasRTL);
+			// Apply BiDi to message with auto-detection (don't force RTL)
+			// Let the BiDi algorithm detect base direction from first strong character
+			std::vector<wchar_t> msgVisual = BuildVisualBidiText_Tagless(msg, msgLen, false);
 			visual.insert(visual.end(), msgVisual.begin(), msgVisual.end());
 		}
 		visual.push_back(L' ');
@@ -778,8 +785,9 @@ static inline std::vector<wchar_t> BuildVisualChatMessage(
 		}
 		else
 		{
-			// Apply BiDi to message based on its content
-			std::vector<wchar_t> msgVisual = BuildVisualBidiText_Tagless(msg, msgLen, msgHasRTL);
+			// Apply BiDi to message with auto-detection (don't force RTL)
+			// Let the BiDi algorithm detect base direction from first strong character
+			std::vector<wchar_t> msgVisual = BuildVisualBidiText_Tagless(msg, msgLen, false);
 			visual.insert(visual.end(), msgVisual.begin(), msgVisual.end());
 		}
 	}

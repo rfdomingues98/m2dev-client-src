@@ -101,11 +101,9 @@ void CGraphicTextInstance::Update()
 			m_pCharInfoVector.clear();
 			m_dwColorInfoVector.clear();
 			m_hyperlinkVector.clear();
-			m_logicalToVisualPos.clear();
-			m_visualToLogicalPos.clear();
 			m_textWidth = 0;
 			m_textHeight = spaceHeight; // Use space height instead of 0 for cursor rendering
-			m_computedRTL = (m_direction == ETextDirection::RTL);
+			m_computedRTL = IsRTL(); // Use global RTL setting
 			m_isUpdate = true;
 		};
 
@@ -131,794 +129,316 @@ void CGraphicTextInstance::Update()
 
 	const char* utf8 = m_stText.c_str();
 	const int utf8Len = (int)m_stText.size();
-	const DWORD defaultColor = m_dwTextColor;
+	DWORD dwColor = m_dwTextColor;
 
-	// UTF-8 -> UTF-16 conversion - reserve enough space to avoid reallocation
+	// UTF-8 -> UTF-16 conversion
 	std::vector<wchar_t> wTextBuf((size_t)utf8Len + 1u, 0);
 	int wTextLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, utf8Len, wTextBuf.data(), (int)wTextBuf.size());
 
 	// If strict UTF-8 conversion fails, try lenient mode (replaces invalid sequences)
 	if (wTextLen <= 0)
 	{
-		DWORD dwError = GetLastError();
-		BIDI_LOG("GrpTextInstance::Update() - STRICT UTF-8 conversion failed (error %u), trying LENIENT mode", dwError);
-		BIDI_LOG("  Text length: %d bytes", utf8Len);
-		BIDI_LOG("  First 32 bytes (hex): %02X %02X %02X %02X %02X %02X %02X %02X...",
-			(utf8Len > 0 ? (unsigned char)utf8[0] : 0),
-			(utf8Len > 1 ? (unsigned char)utf8[1] : 0),
-			(utf8Len > 2 ? (unsigned char)utf8[2] : 0),
-			(utf8Len > 3 ? (unsigned char)utf8[3] : 0),
-			(utf8Len > 4 ? (unsigned char)utf8[4] : 0),
-			(utf8Len > 5 ? (unsigned char)utf8[5] : 0),
-			(utf8Len > 6 ? (unsigned char)utf8[6] : 0),
-			(utf8Len > 7 ? (unsigned char)utf8[7] : 0));
-		BIDI_LOG("  Text preview: %.64s", utf8);
-
 		// Try lenient conversion (no MB_ERR_INVALID_CHARS flag)
-		// This will replace invalid UTF-8 sequences with default character
 		wTextLen = MultiByteToWideChar(CP_UTF8, 0, utf8, utf8Len, wTextBuf.data(), (int)wTextBuf.size());
 
 		if (wTextLen <= 0)
 		{
-			BIDI_LOG("  LENIENT conversion also failed! Text cannot be displayed.");
 			ResetState();
 			return;
 		}
-
-		BIDI_LOG("  LENIENT conversion succeeded - text will display with replacement characters");
 	}
 
+	// Set computed RTL based on global setting
+	m_computedRTL = IsRTL();
 
-	// Detect user-typed text direction (skip hyperlink and color tags)
-	// Used to determine segment order
-	bool userTextIsRTL = false;
-	bool foundUserText = false;
-	{
-		int hyperlinkStep = 0; // 0 = normal, 1 = in metadata (hidden), 2 = in visible text
-		const int wTextLenMinusOne = wTextLen - 1;
-
-		for (int i = 0; i < wTextLen; ++i)
-		{
-			// Check for tags (cache bounds check)
-			if (i < wTextLenMinusOne && wTextBuf[i] == L'|')
-			{
-				if (wTextBuf[i + 1] == L'H')
-				{
-					hyperlinkStep = 1; // Start metadata
-					++i;
-					continue;
-				}
-				else if (wTextBuf[i + 1] == L'h')
-				{
-					if (hyperlinkStep == 1)
-						hyperlinkStep = 2; // End metadata, start visible
-					else if (hyperlinkStep == 2)
-						hyperlinkStep = 0; // End visible
-					++i;
-					continue;
-				}
-				else if (wTextBuf[i + 1] == L'c' && i + 10 <= wTextLen)
-				{
-					// Color tag |cFFFFFFFF - skip 10 characters
-					i += 9; // +1 from loop increment = 10 total
-					continue;
-				}
-				else if (wTextBuf[i + 1] == L'r')
-				{
-					// Color end tag |r - skip
-					++i;
-					continue;
-				}
-			}
-
-			// Only check user-typed text (step 0 = normal text)
-			// SKIP hyperlink visible text (step 2) to prevent hyperlink language from affecting direction
-			if (hyperlinkStep == 0)
-			{
-				if (IsRTLCodepoint(wTextBuf[i]))
-				{
-					userTextIsRTL = true;
-					foundUserText = true;
-					break;
-				}
-				if (IsStrongAlpha(wTextBuf[i]))
-				{
-					userTextIsRTL = false;
-					foundUserText = true;
-					break;
-				}
-			}
-		}
-	}
-
-	// Base direction for BiDi algorithm (for non-hyperlink text reordering)
-	const bool baseRTL =
-		(m_direction == ETextDirection::RTL) ? true :
-		(m_direction == ETextDirection::LTR) ? false :
-		userTextIsRTL;
-
-	// Computed direction for rendering and alignment
-	// Always use baseRTL to respect the UI direction setting
-	// In RTL UI, all text (input and display) should use RTL alignment
-	m_computedRTL = baseRTL;
-
-	// Secret: draw '*' but keep direction
+	// Secret mode: draw '*' instead of actual characters
 	if (m_isSecret)
 	{
 		for (int i = 0; i < wTextLen; ++i)
-			__DrawCharacter(pFontTexture, L'*', defaultColor);
+			__DrawCharacter(pFontTexture, L'*', dwColor);
 
 		pFontTexture->UpdateTexture();
 		m_isUpdate = true;
 		return;
 	}
 
-	const bool hasTags = (std::find(wTextBuf.begin(), wTextBuf.begin() + wTextLen, L'|') != (wTextBuf.begin() + wTextLen));
+	// === RENDERING APPROACH ===
+	// Use BuildVisualBidiText_Tagless() and BuildVisualChatMessage() from utf8.h
+	// These functions handle Arabic shaping, BiDi reordering, and chat formatting properly
 
-	// ========================================================================
-	// Case 1: No tags - Simple BiDi reordering
-	// ========================================================================
-	if (!hasTags)
+	// Special handling for chat messages
+	if (m_isChatMessage && !m_chatName.empty() && !m_chatMessage.empty())
 	{
-		// Build identity mapping (logical == visual for tagless text)
-		const size_t mappingSize = (size_t)wTextLen + 1;
-		m_logicalToVisualPos.resize(mappingSize);
-		m_visualToLogicalPos.resize(mappingSize);
-		for (int i = 0; i <= wTextLen; ++i)
-		{
-			m_logicalToVisualPos[i] = i;
-			m_visualToLogicalPos[i] = i;
-		}
+		std::wstring wName = Utf8ToWide(m_chatName);
+		std::wstring wMsg = Utf8ToWide(m_chatMessage);
 
-		// Use optimized chat message processing if SetChatValue was used
-		if (m_isChatMessage && !m_chatName.empty() && !m_chatMessage.empty())
-		{
-			// Convert chat name and message to wide chars
-			std::wstring wName = Utf8ToWide(m_chatName);
-			std::wstring wMsg = Utf8ToWide(m_chatMessage);
+		// Check if message has tags (hyperlinks)
+		bool msgHasTags = (std::find(wMsg.begin(), wMsg.end(), L'|') != wMsg.end());
 
-			// Use BuildVisualChatMessage for proper BiDi handling
+		if (!msgHasTags)
+		{
+			// No tags: Use BuildVisualChatMessage() for simple BiDi
 			std::vector<wchar_t> visual = BuildVisualChatMessage(
 				wName.data(), (int)wName.size(),
 				wMsg.data(), (int)wMsg.size(),
-				baseRTL);
+				m_computedRTL);
 
 			for (size_t i = 0; i < visual.size(); ++i)
-				__DrawCharacter(pFontTexture, visual[i], defaultColor);
+				__DrawCharacter(pFontTexture, visual[i], dwColor);
+
+			pFontTexture->UpdateTexture();
+			m_isUpdate = true;
+			return;
 		}
 		else
 		{
-			// Legacy path: Check for RTL characters and chat message format in single pass
-			bool hasRTL = false;
-			bool isChatMessage = false;
-			const wchar_t* wTextPtr = wTextBuf.data();
-
-			for (int i = 0; i < wTextLen; ++i)
+			// Has tags (hyperlinks): Rebuild as "Message : Name" or "Name : Message"
+			// then use tag-aware rendering below
+			if (m_computedRTL)
 			{
-				if (!hasRTL && IsRTLCodepoint(wTextPtr[i]))
-					hasRTL = true;
-
-				if (!isChatMessage && i < wTextLen - 2 &&
-				    wTextPtr[i] == L' ' && wTextPtr[i + 1] == L':' && wTextPtr[i + 2] == L' ')
-					isChatMessage = true;
-
-				// Early exit if both found
-				if (hasRTL && isChatMessage)
-					break;
-			}
-
-			// Apply BiDi if text contains RTL OR is a chat message in RTL UI
-			// Skip BiDi for regular input text like :)) in RTL UI
-			if (hasRTL || (baseRTL && isChatMessage))
-			{
-				std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(wTextBuf.data(), wTextLen, baseRTL);
-				for (size_t i = 0; i < visual.size(); ++i)
-					__DrawCharacter(pFontTexture, visual[i], defaultColor);
+				// RTL: "Message : Name"
+				m_stText = m_chatMessage + " : " + m_chatName;
 			}
 			else
 			{
-				// Pure LTR text or non-chat input - no BiDi processing
-				for (int i = 0; i < wTextLen; ++i)
-					__DrawCharacter(pFontTexture, wTextBuf[i], defaultColor);
+				// LTR: "Name : Message" (original format)
+				m_stText = m_chatName + " : " + m_chatMessage;
 			}
-		}
-	}
-	// ========================================================================
-	// Case 2: Has tags - Parse tags and apply BiDi to segments
-	// ========================================================================
-	else
-	{
-		// Special handling for chat messages with tags (e.g., hyperlinks)
-		// We need to process the message separately and then combine with name
-		std::wstring chatNameWide;
-		bool isChatWithTags = false;
 
-		if (m_isChatMessage && !m_chatName.empty() && !m_chatMessage.empty())
-		{
-			isChatWithTags = true;
-			chatNameWide = Utf8ToWide(m_chatName);
-
-			// Process only the message part (not the full text)
-			const char* msgUtf8 = m_chatMessage.c_str();
-			const int msgUtf8Len = (int)m_chatMessage.size();
-
-			// Re-convert to wide chars for message only
+			// Re-convert to wide chars for tag-aware processing below
+			const char* utf8 = m_stText.c_str();
+			const int utf8Len = (int)m_stText.size();
 			wTextBuf.clear();
-			wTextBuf.resize((size_t)msgUtf8Len + 1u, 0);
-			wTextLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, msgUtf8, msgUtf8Len, wTextBuf.data(), (int)wTextBuf.size());
+			wTextBuf.resize((size_t)utf8Len + 1u, 0);
+			wTextLen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, utf8Len, wTextBuf.data(), (int)wTextBuf.size());
 
 			if (wTextLen <= 0)
 			{
-				// Try lenient conversion
-				wTextLen = MultiByteToWideChar(CP_UTF8, 0, msgUtf8, msgUtf8Len, wTextBuf.data(), (int)wTextBuf.size());
+				wTextLen = MultiByteToWideChar(CP_UTF8, 0, utf8, utf8Len, wTextBuf.data(), (int)wTextBuf.size());
 				if (wTextLen <= 0)
 				{
 					ResetState();
 					return;
 				}
 			}
+			// Fall through to tag-aware rendering below
 		}
+	}
 
-		// Check if text contains RTL characters (cache pointer for performance)
-		bool hasRTL = false;
-		const wchar_t* wTextPtr = wTextBuf.data();
-		for (int i = 0; i < wTextLen; ++i)
+	// Check if text contains tags or RTL
+	const bool hasTags = (std::find(wTextBuf.begin(), wTextBuf.begin() + wTextLen, L'|') != (wTextBuf.begin() + wTextLen));
+	bool hasRTL = false;
+	for (int i = 0; i < wTextLen; ++i)
+	{
+		if (IsRTLCodepoint(wTextBuf[i]))
 		{
-			if (IsRTLCodepoint(wTextPtr[i]))
-			{
-				hasRTL = true;
-				break;
-			}
+			hasRTL = true;
+			break;
 		}
-		struct TVisChar
+	}
+
+	// Tag-aware BiDi rendering: Parse tags, apply BiDi per segment, track colors/hyperlinks
+	if (hasRTL || hasTags)
+	{
+		DWORD currentColor = dwColor;
+		int hyperlinkStep = 0; // 0=normal, 1=collecting metadata, 2=visible hyperlink
+		std::wstring hyperlinkMetadata;
+		std::vector<wchar_t> currentSegment;
+
+		SHyperlink currentHyperlink;
+		currentHyperlink.sx = currentHyperlink.ex = 0;
+
+		// Parse text with tags
+		for (int i = 0; i < wTextLen;)
 		{
-			wchar_t ch;
-			DWORD color;
-			int linkIndex; // -1 = none, otherwise index into linkTargets
-			int logicalPos;  // logical index in original wTextBuf (includes tags)
-		};
+			int tagLen = 0;
+			std::wstring tagExtra;
+			int tagType = GetTextTag(&wTextBuf[i], wTextLen - i, tagLen, tagExtra);
 
-		auto ReorderTaggedWithBidi = [&](std::vector<TVisChar>& vis, bool forceRTL, bool isHyperlink, bool shapeOnly = false)
-		{
-			if (vis.empty())
-				return;
-
-			// Extract only characters
-			std::vector<wchar_t> buf;
-			buf.reserve(vis.size());
-			for (const auto& vc : vis)
-				buf.push_back(vc.ch);
-
-			// Special handling for hyperlinks: extract content between [ and ], apply BiDi, then re-add brackets
-			if (isHyperlink && buf.size() > 2)
+			if (tagType == TEXT_TAG_COLOR)
 			{
-				// Find opening and closing brackets
-				int openIdx = -1, closeIdx = -1;
-				for (int i = 0; i < (int)buf.size(); ++i)
+				// Flush current segment with BiDi before changing color
+				if (!currentSegment.empty())
 				{
-					if (buf[i] == L'[' && openIdx < 0) openIdx = i;
-					if (buf[i] == L']' && closeIdx < 0) closeIdx = i;
-				}
-
-				// If we have valid brackets, process content between them
-				if (openIdx >= 0 && closeIdx > openIdx)
-				{
-					// Extract content (without brackets)
-					std::vector<wchar_t> content(buf.begin() + openIdx + 1, buf.begin() + closeIdx);
-
-					// Apply BiDi to content with LTR base (keeps +9 at end)
-					std::vector<wchar_t> contentVisual = BuildVisualBidiText_Tagless(content.data(), (int)content.size(), false);
-
-					// Rebuild: everything before '[', then '[', then processed content, then ']', then everything after
-					std::vector<wchar_t> visual;
-					visual.reserve(buf.size() + contentVisual.size());
-
-					// Copy prefix (before '[')
-					visual.insert(visual.end(), buf.begin(), buf.begin() + openIdx);
-
-					// Add opening bracket
-					visual.push_back(L'[');
-
-					// Add processed content
-					visual.insert(visual.end(), contentVisual.begin(), contentVisual.end());
-
-					// Add closing bracket
-					visual.push_back(L']');
-
-					// Copy suffix (after ']')
-					visual.insert(visual.end(), buf.begin() + closeIdx + 1, buf.end());
-
-					// Handle size change due to Arabic shaping
-					if ((int)visual.size() != (int)vis.size())
+					// Use auto-detection for BiDi (don't force RTL)
+					std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(
+						currentSegment.data(), (int)currentSegment.size(), false);
+					for (size_t j = 0; j < visual.size(); ++j)
 					{
-						std::vector<TVisChar> resized;
-						resized.reserve(visual.size());
-
-						for (size_t i = 0; i < visual.size(); ++i)
-						{
-							size_t src = (i < vis.size()) ? i : (vis.size() - 1);
-							TVisChar tmp = vis[src];
-							tmp.ch = visual[i];
-							resized.push_back(tmp);
-						}
-						vis.swap(resized);
+						int w = __DrawCharacter(pFontTexture, visual[j], currentColor);
+						currentHyperlink.ex += w;
 					}
-					else
+					currentSegment.clear();
+				}
+				currentColor = htoi(tagExtra.c_str(), 8);
+				i += tagLen;
+			}
+			else if (tagType == TEXT_TAG_RESTORE_COLOR)
+			{
+				// Flush segment before restoring color
+				if (!currentSegment.empty())
+				{
+					// Use auto-detection for BiDi (don't force RTL)
+					std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(
+						currentSegment.data(), (int)currentSegment.size(), false);
+					for (size_t j = 0; j < visual.size(); ++j)
 					{
-						// Same size: write back characters
-						for (size_t i = 0; i < vis.size(); ++i)
-							vis[i].ch = visual[i];
+						int w = __DrawCharacter(pFontTexture, visual[j], currentColor);
+						currentHyperlink.ex += w;
 					}
-					return;
+					currentSegment.clear();
 				}
+				currentColor = dwColor;
+				i += tagLen;
 			}
-
-			// Non-hyperlink or no brackets found: use normal BiDi processing
-			std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(buf.data(), (int)buf.size(), forceRTL);
-
-			// If size differs (rare, but can happen with Arabic shaping expansion),
-			// do a safe best-effort resize while preserving style.
-			if ((int)visual.size() != (int)vis.size())
-			{
-				// Keep style from nearest original character
-				std::vector<TVisChar> resized;
-				resized.reserve(visual.size());
-
-				if (vis.empty())
-					return;
-
-				for (size_t i = 0; i < visual.size(); ++i)
-				{
-					size_t src = (i < vis.size()) ? i : (vis.size() - 1);
-					TVisChar tmp = vis[src];
-					tmp.ch = visual[i];
-					resized.push_back(tmp);
-				}
-				vis.swap(resized);
-				return;
-			}
-
-			// Same size: just write back characters, keep color + linkIndex intact
-			for (size_t i = 0; i < vis.size(); ++i)
-				vis[i].ch = visual[i];
-		};
-
-		DWORD curColor = defaultColor;
-
-		// hyperlinkStep: 0=none, 1=collecting target after |H, 2=visible section between |h and |h
-		int hyperlinkStep = 0;
-		std::wstring hyperlinkTarget;
-		hyperlinkTarget.reserve(64); // Reserve typical hyperlink target size
-		int activeLinkIndex = -1;
-
-		std::vector<std::wstring> linkTargets; // linkTargets[i] is target text for link i
-		linkTargets.reserve(4); // Reserve space for typical number of links
-
-		std::vector<TVisChar> logicalVis;
-		logicalVis.reserve((size_t)wTextLen); // Reserve max possible size
-
-		// Build logical->visual position mapping (reserve to avoid reallocation)
-		const size_t mappingSize = (size_t)wTextLen + 1;
-		m_logicalToVisualPos.resize(mappingSize, 0);
-
-		// ====================================================================
-		// PHASE 1: Parse tags and collect visible characters
-		// ====================================================================
-		int tagLen = 1;
-		std::wstring tagExtra;
-
-		for (int i = 0; i < wTextLen; )
-		{
-			m_logicalToVisualPos[i] = (int)logicalVis.size();
-
-			tagExtra.clear();
-			int ret = GetTextTag(&wTextBuf[i], wTextLen - i, tagLen, tagExtra);
-			if (tagLen <= 0) tagLen = 1;
-
-			if (ret == TEXT_TAG_PLAIN)
-			{
-				wchar_t ch = wTextBuf[i];
-
-				if (hyperlinkStep == 1)
-				{
-					// Collect hyperlink target text between |H and first |h
-					hyperlinkTarget.push_back(ch);
-				}
-				else
-				{
-					// Regular visible character
-					logicalVis.push_back(TVisChar{ ch, curColor, activeLinkIndex, i });
-				}
-
-				i += 1;
-				continue;
-			}
-
-			// Tag handling
-			if (ret == TEXT_TAG_COLOR)
-			{
-				curColor = htoi(tagExtra.c_str(), 8);
-			}
-			else if (ret == TEXT_TAG_RESTORE_COLOR)
-			{
-				curColor = defaultColor;
-			}
-			else if (ret == TEXT_TAG_HYPERLINK_START)
+			else if (tagType == TEXT_TAG_HYPERLINK_START)
 			{
 				hyperlinkStep = 1;
-				hyperlinkTarget.clear();
-				activeLinkIndex = -1;
+				hyperlinkMetadata.clear();
+				i += tagLen;
 			}
-			else if (ret == TEXT_TAG_HYPERLINK_END)
+			else if (tagType == TEXT_TAG_HYPERLINK_END)
 			{
 				if (hyperlinkStep == 1)
 				{
-					// End metadata => start visible section
-					hyperlinkStep = 2;
+					// End of metadata, start visible section
+					// Flush any pending non-hyperlink segment first
+					if (!currentSegment.empty())
+					{
+						// Use auto-detection for BiDi (don't force RTL)
+						std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(
+							currentSegment.data(), (int)currentSegment.size(), false);
+						for (size_t j = 0; j < visual.size(); ++j)
+						{
+							int w = __DrawCharacter(pFontTexture, visual[j], currentColor);
+							currentHyperlink.ex += w;
+						}
+						currentSegment.clear();
+					}
 
-					linkTargets.push_back(hyperlinkTarget);
-					activeLinkIndex = (int)linkTargets.size() - 1;
+					hyperlinkStep = 2;
+					currentHyperlink.text = hyperlinkMetadata;
+					currentHyperlink.sx = currentHyperlink.ex; // Start hyperlink at current cursor position
 				}
 				else if (hyperlinkStep == 2)
 				{
-					// End visible section
-					hyperlinkStep = 0;
-					activeLinkIndex = -1;
-					hyperlinkTarget.clear();
-				}
-			}
-
-			i += tagLen;
-		}
-
-		// ====================================================================
-		// PHASE 2: Apply BiDi to hyperlinks (if RTL text or RTL UI)
-		// ====================================================================
-		// DISABLED: Hyperlinks are pre-formatted and stored in visual order
-		// Applying BiDi to them reverses text that's already correct
-		// This section is kept for reference but should not execute
-		if (false)
-		{
-			// Collect all hyperlink ranges (reserve typical count)
-			struct LinkRange { int start; int end; int linkIdx; };
-			std::vector<LinkRange> linkRanges;
-			linkRanges.reserve(linkTargets.size());
-
-			int currentLink = -1;
-			int linkStart = -1;
-			const int logicalVisCount = (int)logicalVis.size();
-
-			for (int i = 0; i <= logicalVisCount; ++i)
-			{
-				const int linkIdx = (i < logicalVisCount) ? logicalVis[i].linkIndex : -1;
-
-				if (linkIdx != currentLink)
-				{
-					if (currentLink >= 0 && linkStart >= 0)
+					// End of visible section - render hyperlink text with proper Arabic handling
+					// Format: [Arabic Text] or [English Text]
+					// Keep brackets in position, reverse Arabic content between them
+					if (!currentSegment.empty())
 					{
-						linkRanges.push_back({linkStart, i, currentLink});
-					}
-
-					currentLink = linkIdx;
-					linkStart = (currentLink >= 0) ? i : -1;
-				}
-			}
-
-			// Process hyperlinks in reverse order to avoid index shifting
-			const int numRanges = (int)linkRanges.size();
-			for (int rangeIdx = numRanges - 1; rangeIdx >= 0; --rangeIdx)
-			{
-				const LinkRange& range = linkRanges[rangeIdx];
-				const int linkStart = range.start;
-				const int linkEnd = range.end;
-				const int linkLength = linkEnd - linkStart;
-
-				// Extract hyperlink text (pre-reserve exact size)
-				std::vector<wchar_t> linkBuf;
-				linkBuf.reserve(linkLength);
-				for (int j = linkStart; j < linkEnd; ++j)
-					linkBuf.push_back(logicalVis[j].ch);
-
-				// Apply BiDi with LTR base direction (hyperlinks use LTR structure like [+9 item])
-				std::vector<wchar_t> linkVisual = BuildVisualBidiText_Tagless(linkBuf.data(), (int)linkBuf.size(), false);
-
-				// Normalize brackets and enhancement markers
-				const int linkVisualSize = (int)linkVisual.size();
-				if (linkVisualSize > 0)
-				{
-					// Find first '[' and first ']' (cache size)
-					int openBracket = -1, closeBracket = -1;
-					for (int j = 0; j < linkVisualSize; ++j)
-					{
-						if (linkVisual[j] == L'[' && openBracket < 0) openBracket = j;
-						if (linkVisual[j] == L']' && closeBracket < 0) closeBracket = j;
-					}
-
-					// Case 1: Brackets are reversed "]text[" => "[text]"
-					if (closeBracket >= 0 && openBracket > closeBracket)
-					{
-						std::vector<wchar_t> normalized;
-						normalized.reserve(linkVisual.size());
-
-						// Rebuild: [ + (before ]) + (between ] and [) + (after [) + ]
-						normalized.push_back(L'[');
-
-						for (int j = 0; j < closeBracket; ++j)
-							normalized.push_back(linkVisual[j]);
-
-						for (int j = closeBracket + 1; j < openBracket; ++j)
-							normalized.push_back(linkVisual[j]);
-
-						for (int j = openBracket + 1; j < (int)linkVisual.size(); ++j)
-							normalized.push_back(linkVisual[j]);
-
-						normalized.push_back(L']');
-
-						linkVisual = normalized;
-						openBracket = 0;
-						closeBracket = (int)linkVisual.size() - 1;
-					}
-
-					// Case 2: Normal brackets "[...]" - check for normalization
-					if (openBracket >= 0 && closeBracket > openBracket)
-					{
-						int pos = openBracket + 1;
-
-						// Skip leading spaces inside brackets
-						while (pos < closeBracket && linkVisual[pos] == L' ')
+						// Find bracket positions
+						int openBracket = -1, closeBracket = -1;
+						for (size_t idx = 0; idx < currentSegment.size(); ++idx)
 						{
-							linkVisual.erase(linkVisual.begin() + pos);
-							closeBracket--;
+							if (currentSegment[idx] == L'[' && openBracket == -1)
+								openBracket = (int)idx;
+							else if (currentSegment[idx] == L']' && closeBracket == -1)
+								closeBracket = (int)idx;
 						}
 
-						// Check for "+<digits>" pattern and reverse to "<digits>+"
-						if (pos < closeBracket && linkVisual[pos] == L'+')
+						if (openBracket >= 0 && closeBracket > openBracket)
 						{
-							int digitStart = pos + 1;
-							int digitEnd = digitStart;
+							// Extract content between brackets
+							std::vector<wchar_t> content(
+								currentSegment.begin() + openBracket + 1,
+								currentSegment.begin() + closeBracket);
 
-							while (digitEnd < closeBracket && (linkVisual[digitEnd] >= L'0' && linkVisual[digitEnd] <= L'9'))
-								digitEnd++;
+							// Apply Arabic shaping to content
+							std::vector<wchar_t> shaped(content.size() * 2 + 16, 0);
+							int shapedLen = Arabic_MakeShape(content.data(), (int)content.size(),
+							                                 shaped.data(), (int)shaped.size());
 
-							if (digitEnd > digitStart)
+							// Render: "[" + reversed_arabic + "]"
+							// 1. Opening bracket
+							int w = __DrawCharacter(pFontTexture, L'[', currentColor);
+							currentHyperlink.ex += w;
+
+							// 2. Arabic content (shaped and REVERSED for RTL display)
+							if (shapedLen > 0)
 							{
-								wchar_t plus = L'+';
-								for (int k = pos; k < digitEnd - 1; ++k)
-									linkVisual[k] = linkVisual[k + 1];
-								linkVisual[digitEnd - 1] = plus;
+								for (int j = shapedLen - 1; j >= 0; --j)
+								{
+									w = __DrawCharacter(pFontTexture, shaped[j], currentColor);
+									currentHyperlink.ex += w;
+								}
+							}
+							else
+							{
+								// Fallback: reverse original content
+								for (int j = (int)content.size() - 1; j >= 0; --j)
+								{
+									w = __DrawCharacter(pFontTexture, content[j], currentColor);
+									currentHyperlink.ex += w;
+								}
+							}
+
+							// 3. Closing bracket
+							w = __DrawCharacter(pFontTexture, L']', currentColor);
+							currentHyperlink.ex += w;
+
+							// 4. Render any text after closing bracket (if any)
+							for (size_t idx = closeBracket + 1; idx < currentSegment.size(); ++idx)
+							{
+								w = __DrawCharacter(pFontTexture, currentSegment[idx], currentColor);
+								currentHyperlink.ex += w;
 							}
 						}
+						else
+						{
+							// No brackets found - render as-is (shouldn't happen for hyperlinks)
+							for (size_t j = 0; j < currentSegment.size(); ++j)
+							{
+								int w = __DrawCharacter(pFontTexture, currentSegment[j], currentColor);
+								currentHyperlink.ex += w;
+							}
+						}
+						currentSegment.clear();
 					}
+					m_hyperlinkVector.push_back(currentHyperlink);
+					hyperlinkStep = 0;
 				}
-
-				// Write back - handle size changes by erasing/inserting
-				const int originalSize = linkLength;
-				const int newSize = (int)linkVisual.size();
-				const int sizeDiff = newSize - originalSize;
-
-				// Replace existing characters (cache min for performance)
-				const int copyCount = (std::min)(originalSize, newSize);
-				for (int j = 0; j < copyCount; ++j)
-					logicalVis[linkStart + j].ch = linkVisual[j];
-
-				if (sizeDiff < 0)
-				{
-					// Shrunk - remove extra characters
-					logicalVis.erase(logicalVis.begin() + linkStart + newSize,
-					                 logicalVis.begin() + linkStart + originalSize);
-				}
-				else if (sizeDiff > 0)
-				{
-					// Grew - insert new characters
-					TVisChar templateChar = logicalVis[linkStart];
-					templateChar.logicalPos = logicalVis[linkStart].logicalPos;
-					for (int j = originalSize; j < newSize; ++j)
-					{
-						templateChar.ch = linkVisual[j];
-						logicalVis.insert(logicalVis.begin() + linkStart + j, templateChar);
-					}
-				}
+				i += tagLen;
 			}
-		}
-
-		// Apply BiDi to segments - always process hyperlinks, optionally process other text
-		// For input fields: only process hyperlinks (preserve cursor for regular text)
-		// For display text: process everything and reorder segments
-		const bool hasHyperlinks = !linkTargets.empty();
-		const bool shouldProcessBidi = (hasRTL || baseRTL) && (!m_isCursor || hasHyperlinks);
-
-		if (shouldProcessBidi)
-		{
-			// Split text into hyperlink and non-hyperlink segments (reserve typical count)
-			const size_t estimatedSegments = linkTargets.size() * 2 + 1;
-			std::vector<std::vector<TVisChar>> segments;
-			segments.reserve(estimatedSegments); // Estimate: links + text between
-
-			std::vector<bool> isHyperlink; // true if segment is a hyperlink
-			isHyperlink.reserve(estimatedSegments);
-
-			int segStart = 0;
-			int currentLinkIdx = (logicalVis.empty() ? -1 : logicalVis[0].linkIndex);
-			const int logicalVisSize2 = (int)logicalVis.size();
-
-			for (int i = 1; i <= logicalVisSize2; ++i)
+			else // TEXT_TAG_PLAIN or TEXT_TAG_TAG
 			{
-				const int linkIdx = (i < logicalVisSize2) ? logicalVis[i].linkIndex : -1;
-
-				if (linkIdx != currentLinkIdx)
+				if (hyperlinkStep == 1)
 				{
-					// Segment boundary
-					std::vector<TVisChar> seg(logicalVis.begin() + segStart, logicalVis.begin() + i);
-					segments.push_back(seg);
-					isHyperlink.push_back(currentLinkIdx >= 0);
-
-					segStart = i;
-					currentLinkIdx = linkIdx;
+					// Collecting hyperlink metadata (hidden)
+					hyperlinkMetadata.push_back(wTextBuf[i]);
 				}
-			}
-
-			// Apply BiDi to segments
-			// For input fields: skip non-hyperlink segments to preserve cursor
-			// For display text: process all segments
-			const size_t numSegments = segments.size();
-			for (size_t s = 0; s < numSegments; ++s)
-			{
-				// Skip non-hyperlink segments in input fields to preserve cursor
-				if (m_isCursor && !isHyperlink[s])
-					continue;
-
-				ReorderTaggedWithBidi(segments[s], baseRTL, isHyperlink[s], false);
-			}
-
-			// Rebuild text from segments
-			logicalVis.clear();
-			logicalVis.reserve(logicalVisSize2); // Reserve original size
-
-			// IMPORTANT: Only reverse segments for display text, NOT for input fields
-			// Input fields need to preserve logical order for proper cursor positioning
-			// Display text (received chat messages) can reverse for better RTL reading flow
-			const bool shouldReverseSegments = baseRTL && !m_isCursor;
-
-			if (shouldReverseSegments)
-			{
-				// RTL display text - reverse segments for right-to-left reading
-				// Example: "Hello [link]" becomes "[link] Hello" visually
-				for (int s = (int)numSegments - 1; s >= 0; --s)
+				else
 				{
-					logicalVis.insert(logicalVis.end(), segments[s].begin(), segments[s].end());
+					// Add to current segment
+					// Will be BiDi-processed for normal text, or rendered directly for hyperlinks
+					currentSegment.push_back(wTextBuf[i]);
 				}
+				i += tagLen;
 			}
-			else
+		}
+
+		// Flush any remaining segment
+		if (!currentSegment.empty())
+		{
+			// Use auto-detection for BiDi (don't force RTL)
+			std::vector<wchar_t> visual = BuildVisualBidiText_Tagless(
+				currentSegment.data(), (int)currentSegment.size(), false);
+			for (size_t j = 0; j < visual.size(); ++j)
 			{
-				// LTR UI or input field - keep original segment order
-				// Input fields must preserve logical order for cursor to work correctly
-				for (size_t s = 0; s < numSegments; ++s)
-				{
-					logicalVis.insert(logicalVis.end(), segments[s].begin(), segments[s].end());
-				}
+				int w = __DrawCharacter(pFontTexture, visual[j], currentColor);
+				currentHyperlink.ex += w;
 			}
 		}
 
-		// ====================================================================
-		// FINAL: Rebuild visual<->logical mapping AFTER all BiDi/tag reordering
-		// ====================================================================
-
-		m_visualToLogicalPos.clear();
-		m_logicalToVisualPos.clear();
-
-		// logical positions refer to indices in wTextBuf (tagged string)
-		m_logicalToVisualPos.resize((size_t)wTextLen + 1, -1);
-		m_visualToLogicalPos.resize((size_t)logicalVis.size() + 1, wTextLen);
-
-		// Fill visual->logical from stored glyph origin
-		for (size_t v = 0; v < logicalVis.size(); ++v)
-		{
-			int lp = logicalVis[v].logicalPos;
-			if (lp < 0) lp = 0;
-			if (lp > wTextLen) lp = wTextLen;
-
-			m_visualToLogicalPos[v] = lp;
-
-			// For logical->visual, keep the first visual position that maps to lp
-			if (m_logicalToVisualPos[(size_t)lp] < 0)
-				m_logicalToVisualPos[(size_t)lp] = (int)v;
-		}
-
-		// End positions
-		m_visualToLogicalPos[logicalVis.size()] = wTextLen;
-		m_logicalToVisualPos[(size_t)wTextLen] = (int)logicalVis.size();
-
-		// Fill gaps in logical->visual so cursor movement doesn't break on tag-only regions
-		int last = 0;
-		for (int i = 0; i <= wTextLen; ++i)
-		{
-			if (m_logicalToVisualPos[(size_t)i] < 0)
-				m_logicalToVisualPos[(size_t)i] = last;
-			else
-				last = m_logicalToVisualPos[(size_t)i];
-		}
-
-		// ====================================================================
-		// PHASE 3: Render and build hyperlink ranges
-		// ====================================================================
-		m_hyperlinkVector.clear();
-		m_hyperlinkVector.reserve(linkTargets.size()); // Reserve for known hyperlinks
-
-		int x = 0;
-		int currentLink = -1;
-		SHyperlink curLinkRange{};
-		curLinkRange.sx = 0;
-		curLinkRange.ex = 0;
-
-		// For LTR chat messages with tags, render name and separator first
-		if (isChatWithTags && !chatNameWide.empty() && !baseRTL)
-		{
-			// LTR UI: "Name : Message"
-			for (size_t i = 0; i < chatNameWide.size(); ++i)
-				x += __DrawCharacter(pFontTexture, chatNameWide[i], defaultColor);
-			x += __DrawCharacter(pFontTexture, L' ', defaultColor);
-			x += __DrawCharacter(pFontTexture, L':', defaultColor);
-			x += __DrawCharacter(pFontTexture, L' ', defaultColor);
-		}
-		// For RTL, we'll append name AFTER the message (see below)
-
-		// Cache size for loop (avoid repeated size() calls)
-		const size_t logicalVisRenderSize = logicalVis.size();
-		for (size_t idx = 0; idx < logicalVisRenderSize; ++idx)
-		{
-			const TVisChar& vc = logicalVis[idx];
-			const int charWidth = __DrawCharacter(pFontTexture, vc.ch, vc.color);
-
-			// Hyperlink range tracking
-			const int linkIdx = vc.linkIndex;
-
-			if (linkIdx != currentLink)
-			{
-				// Close previous hyperlink
-				if (currentLink >= 0)
-				{
-					curLinkRange.text = linkTargets[(size_t)currentLink];
-					m_hyperlinkVector.push_back(curLinkRange);
-				}
-
-				// Open new hyperlink
-				currentLink = linkIdx;
-				if (currentLink >= 0)
-				{
-					curLinkRange = SHyperlink{};
-					curLinkRange.sx = (short)x;
-					curLinkRange.ex = (short)x;
-				}
-			}
-
-			if (currentLink >= 0)
-			{
-				curLinkRange.ex = (short)(curLinkRange.ex + charWidth);
-			}
-
-			x += charWidth;
-		}
-
-		// Close last hyperlink
-		if (currentLink >= 0)
-		{
-			curLinkRange.text = linkTargets[(size_t)currentLink];
-			m_hyperlinkVector.push_back(curLinkRange);
-		}
-
-		// Add chat name and separator for RTL messages with tags
-		if (isChatWithTags && !chatNameWide.empty() && baseRTL)
-		{
-			// RTL UI: "Message : Name" (render order matches BuildVisualChatMessage)
-			// Message was already rendered above, now append separator and name
-			// When RTL-aligned, this produces visual: [item] on right, name on left
-			__DrawCharacter(pFontTexture, L' ', defaultColor);
-			__DrawCharacter(pFontTexture, L':', defaultColor);
-			__DrawCharacter(pFontTexture, L' ', defaultColor);
-			for (size_t i = 0; i < chatNameWide.size(); ++i)
-				__DrawCharacter(pFontTexture, chatNameWide[i], defaultColor);
-		}
+		pFontTexture->UpdateTexture();
+		m_isUpdate = true;
+		return;
 	}
+
+	// Simple LTR rendering for plain text (no tags, no RTL)
+	// Just draw characters in logical order
+	for (int i = 0; i < wTextLen; ++i)
+		__DrawCharacter(pFontTexture, wTextBuf[i], dwColor);
 
 	pFontTexture->UpdateTexture();
 	m_isUpdate = true;
