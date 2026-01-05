@@ -56,6 +56,27 @@ bool CTextureSet::Load(const char * c_szTextureSetFileName, float fTerrainTexCoo
 
 	m_Textures.resize(lCount + 1);
 
+	std::vector<std::string> textureFiles;
+	textureFiles.reserve(lCount);
+
+	for (long i = 0; i < lCount; ++i)
+	{
+		_snprintf(szTextureName, sizeof(szTextureName), "texture%03d", i + 1);
+
+		if (stTokenVectorMap.end() == stTokenVectorMap.find(szTextureName))
+			continue;
+
+		const CTokenVector & rVector = stTokenVectorMap[szTextureName];
+		const std::string & c_rstrFileName = rVector[0].c_str();
+
+		textureFiles.push_back(c_rstrFileName);
+	}
+
+	for (const auto& filename : textureFiles)
+	{
+		CResourceManager::Instance().GetResourcePointer(filename.c_str());
+	}
+
 	for (long i = 0; i < lCount; ++i)
 	{
 		_snprintf(szTextureName, sizeof(szTextureName), "texture%03d", i + 1);

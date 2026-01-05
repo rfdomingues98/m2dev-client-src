@@ -1,14 +1,49 @@
 #include "PackManager.h"
+#include "EterLib/BufferPool.h"
 #include <fstream>
 #include <filesystem>
+
+CPackManager::CPackManager()
+	: m_load_from_pack(true)
+	, m_pBufferPool(nullptr)
+{
+	m_pBufferPool = new CBufferPool();
+}
+
+CPackManager::~CPackManager()
+{
+	if (m_pBufferPool)
+	{
+		delete m_pBufferPool;
+		m_pBufferPool = nullptr;
+	}
+}
 
 bool CPackManager::AddPack(const std::string& path)
 {
 	std::shared_ptr<CPack> pack = std::make_shared<CPack>();
-	return pack->Open(path, m_entries);
+
+	if (!pack->Load(path))
+	{
+		return false;
+	}
+
+	std::lock_guard<std::mutex> lock(m_mutex);
+	const auto& index = pack->GetIndex();
+	for (const auto& entry : index)
+	{
+		m_entries[entry.file_name] = std::make_pair(pack, entry);
+	}
+
+	return true;
 }
 
 bool CPackManager::GetFile(std::string_view path, TPackFile& result)
+{
+	return GetFileWithPool(path, result, m_pBufferPool);
+}
+
+bool CPackManager::GetFileWithPool(std::string_view path, TPackFile& result, CBufferPool* pPool)
 {
 	thread_local std::string buf;
 	NormalizePath(path, buf);
@@ -16,7 +51,7 @@ bool CPackManager::GetFile(std::string_view path, TPackFile& result)
 	if (m_load_from_pack) {
 		auto it = m_entries.find(buf);
 		if (it != m_entries.end()) {
-			return it->second.first->GetFile(it->second.second, result);
+			return it->second.first->GetFileWithPool(it->second.second, result, pPool);
 		}
 	}
 	else {
@@ -25,7 +60,14 @@ bool CPackManager::GetFile(std::string_view path, TPackFile& result)
 			ifs.seekg(0, std::ios::end);
 			size_t size = ifs.tellg();
 			ifs.seekg(0, std::ios::beg);
-			result.resize(size);
+
+			if (pPool) {
+				result = pPool->Acquire(size);
+				result.resize(size);
+			} else {
+				result.resize(size);
+			}
+
 			if (ifs.read((char*)result.data(), size)) {
 				return true;
 			}

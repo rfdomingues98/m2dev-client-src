@@ -349,7 +349,12 @@ bool CInstanceBase::NEW_UseSkill(UINT uSkill, UINT uMot, UINT uMotLoopCount, boo
 	float fCurRot=m_GraphicThingInstance.GetTargetRotation();
 	SetAdvancingRotation(fCurRot);
 
-	m_GraphicThingInstance.InterceptOnceMotion(CRaceMotionData::NAME_SKILL + uMot, 0.1f, uSkill, 1.0f);
+	// MR-7: Don't show skill motion if character is invisible
+	if (!IsAffect(AFFECT_INVISIBILITY))
+	{
+		m_GraphicThingInstance.InterceptOnceMotion(CRaceMotionData::NAME_SKILL + uMot, 0.1f, uSkill, 1.0f);
+	}
+	// MR-7: -- END OF -- Don't show skill motion if character is invisible
 
 	m_GraphicThingInstance.__OnUseSkill(uMot, uMotLoopCount, isMovingSkill);
 

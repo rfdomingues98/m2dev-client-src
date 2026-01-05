@@ -211,7 +211,7 @@ void CGraphicObjectInstance::ReleaseAlwaysHidden() {
 
 bool CGraphicObjectInstance::isShow()
 {
-	return m_isVisible && !m_isAlwaysHidden;
+	return m_isVisible;
 }
 
 // 

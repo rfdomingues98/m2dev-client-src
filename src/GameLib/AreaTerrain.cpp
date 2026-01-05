@@ -470,9 +470,36 @@ bool CTerrain::LoadHeightMap(const char * c_pszFileName)
 {
 	CTerrainImpl::LoadHeightMap(c_pszFileName);
 	DWORD dwStart = ELTimer_GetMSec();
+
+	const float fHeightScale = m_fHeightScale;
+	const float fNormalZ = 2.0f * static_cast<float>(CELLSCALE);
+	const float fNormalScale = 127.0f;
+	const int stride = HEIGHTMAP_RAW_XSIZE;
+
 	for (WORD y = 0; y < NORMALMAP_YSIZE; ++y)
+	{
+		WORD* pRowTop = &m_awRawHeightMap[(y) * stride];
+		WORD* pRowMid = &m_awRawHeightMap[(y + 1) * stride];
+		WORD* pRowBot = &m_awRawHeightMap[(y + 2) * stride];
+
+		char* pNormal = &m_acNormalMap[(y * NORMALMAP_XSIZE) * 3];
+
 		for (WORD x = 0; x < NORMALMAP_XSIZE; ++x)
-			CalculateNormal(x, y);
+		{
+			float nx = -fHeightScale * ((float)pRowMid[x] - (float)pRowMid[x + 2]);
+			float ny = -fHeightScale * ((float)pRowTop[x + 1] - (float)pRowBot[x + 1]);
+			float nz = fNormalZ;
+
+			float fInvLen = fNormalScale / sqrtf(nx*nx + ny*ny + nz*nz);
+			nx *= fInvLen;
+			ny *= fInvLen;
+			nz *= fInvLen;
+
+			*pNormal++ = (char)nx;
+			*pNormal++ = (char)ny;
+			*pNormal++ = (char)nz;
+		}
+	}
 		
 	Tracef("LoadHeightMap::CalculateNormal %d ms\n", ELTimer_GetMSec() - dwStart);
 	return true;
@@ -669,63 +696,53 @@ void CTerrain::RAW_GenerateSplat(bool bBGLoading)
 				rSplat.NeedsUpdate = 0;
 
 				aptr = abyAlphaMap;
+				const BYTE* pTileMap = m_abyTileMap;
+				const int iStride = TILEMAP_RAW_XSIZE;
 
 				for (long y = 0; y < SPLATALPHA_RAW_YSIZE; ++y)
 				{
+					const BYTE* pRow = pTileMap + (y * iStride);
+					const BYTE* pRowUp = (y > 0) ? (pRow - iStride) : NULL;
+					const BYTE* pRowDown = (y < SPLATALPHA_RAW_YSIZE - 1) ? (pRow + iStride) : NULL;
+
 					for (long x = 0; x < SPLATALPHA_RAW_XSIZE; ++x)
 					{
-						long lTileMapOffset = y * TILEMAP_RAW_XSIZE + x;
-						 
-						BYTE byTileNum = m_abyTileMap[lTileMapOffset];
+						BYTE byTileNum = pRow[x];
+
 						if (byTileNum == i)
- 							*aptr = 0xFF;
+						{
+							*aptr++ = 0xFF;
+						}
 						else if (byTileNum > i)
 						{
-							BYTE byTileTL, byTileTR, byTileBL, byTileBR, byTileT, byTileB, byTileL, byTileR;
+							bool bFound = false;
 
-							if ( x > 0 && y > 0 )
-								byTileTL = m_abyTileMap[lTileMapOffset - TILEMAP_RAW_YSIZE - 1];
-							else
-								byTileTL = 0;
-							if ( x < (SPLATALPHA_RAW_XSIZE - 1) && y > 0 )
-								byTileTR = m_abyTileMap[lTileMapOffset - TILEMAP_RAW_YSIZE + 1];
-							else
-								byTileTR = 0;
-							if ( x > 0 && y < (SPLATALPHA_RAW_YSIZE - 1) )
-								byTileBL = m_abyTileMap[lTileMapOffset + TILEMAP_RAW_YSIZE - 1];
-							else
-								byTileBL = 0;
-							if ( x < (SPLATALPHA_RAW_XSIZE - 1) && y < (SPLATALPHA_RAW_YSIZE - 1) )
-								byTileBR = m_abyTileMap[lTileMapOffset + TILEMAP_RAW_YSIZE + 1];
-							else
-								byTileBR = 0;
-							if ( y > 0 )
-								byTileT = m_abyTileMap[lTileMapOffset - TILEMAP_RAW_YSIZE];
-							else
-								byTileT = 0;
-							if ( y < (SPLATALPHA_RAW_YSIZE - 1) )
-								byTileB = m_abyTileMap[lTileMapOffset + TILEMAP_RAW_YSIZE];
-							else
-								byTileB = 0;
-							if ( x > 0 )
-								byTileL = m_abyTileMap[lTileMapOffset - 1];
-							else
-								byTileL = 0;
-							if ( x < (SPLATALPHA_RAW_XSIZE - 1) )
-								byTileR = m_abyTileMap[lTileMapOffset + 1];
-							else
-								byTileR = 0;
+							// Check horizontal
+							if (x > 0 && pRow[x - 1] == i) bFound = true;
+							else if (x < SPLATALPHA_RAW_XSIZE - 1 && pRow[x + 1] == i) bFound = true;
 							
-							if (byTileTL == i || byTileTR == i || byTileBL == i || byTileBR == i ||
-								byTileT == i || byTileB == i || byTileL == i || byTileR == i)
- 								*aptr = 0xFF;
-							else
- 								*aptr = 0x00;
+							// Check Up
+							else if (pRowUp)
+							{
+								if (pRowUp[x] == i) bFound = true;
+								else if (x > 0 && pRowUp[x - 1] == i) bFound = true;
+								else if (x < SPLATALPHA_RAW_XSIZE - 1 && pRowUp[x + 1] == i) bFound = true;
+							}
+
+							// Check Down (only if not found yet)
+							if (!bFound && pRowDown)
+							{
+								if (pRowDown[x] == i) bFound = true;
+								else if (x > 0 && pRowDown[x - 1] == i) bFound = true;
+								else if (x < SPLATALPHA_RAW_XSIZE - 1 && pRowDown[x + 1] == i) bFound = true;
+							}
+
+							*aptr++ = bFound ? 0xFF : 0x00;
 						}
 						else
- 							*aptr = 0x00;
-
- 						++aptr;
+						{
+							*aptr++ = 0x00;
+						}
 					}
 				}
 

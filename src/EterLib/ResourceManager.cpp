@@ -7,6 +7,8 @@
 
 #include "ResourceManager.h"
 #include "GrpImage.h"
+#include "TextureCache.h"
+#include "DecodedImageData.h"
 
 int g_iLoadingDelayTime = 1;  // Reduced from 20ms to 1ms for faster async loading
 
@@ -68,7 +70,16 @@ void CResourceManager::ProcessBackgroundLoading()
 		}
 
 		//printf("REQ %s\n", stFileName.c_str());
-		ms_loadingThread.Request(stFileName);
+
+			if (m_pLoaderThreadPool)
+		{
+			m_pLoaderThreadPool->Request(stFileName);
+		}
+		else
+		{
+			ms_loadingThread.Request(stFileName);
+		}
+
 		m_WaitingMap.insert(TResourceRequestMap::value_type(dwFileCRC, stFileName));
 		itor = m_RequestMap.erase(itor);
 		//break; // NOTE: 여기서 break 하면 천천히 로딩 된다.
@@ -76,6 +87,44 @@ void CResourceManager::ProcessBackgroundLoading()
 
 	DWORD dwCurrentTime = ELTimer_GetMSec();
 
+	if (m_pLoaderThreadPool)
+	{
+		CFileLoaderThreadPool::TLoadResult result;
+		while (m_pLoaderThreadPool->Fetch(result))
+		{
+			CResource * pResource = GetResourcePointer(result.stFileName.c_str());
+
+			if (pResource)
+			{
+				if (pResource->IsEmpty())
+				{
+						if (result.hasDecodedImage)
+					{
+						CGraphicImage* pImage = dynamic_cast<CGraphicImage*>(pResource);
+						if (pImage)
+						{
+							pImage->OnLoadFromDecodedData(result.decodedImage);
+						}
+						else
+						{
+									pResource->OnLoad(result.File.size(), result.File.data());
+						}
+					}
+					else
+					{
+							pResource->OnLoad(result.File.size(), result.File.data());
+					}
+
+					pResource->AddReferenceOnly();
+					m_pResRefDecreaseWaitingMap.insert(TResourceRefDecreaseWaitingMap::value_type(dwCurrentTime, pResource));
+				}
+			}
+
+			m_WaitingMap.erase(GetCRC32(result.stFileName.c_str(), result.stFileName.size()));
+		}
+	}
+
+	// Process old thread results
 	CFileLoaderThread::TData * pData;
 	while (ms_loadingThread.Fetch(&pData))
 	{
@@ -203,6 +252,9 @@ void CResourceManager::RegisterResourceNewFunctionByTypePointer(int iType, CReso
 
 CResource * CResourceManager::InsertResourcePointer(DWORD dwFileCRC, CResource* pResource)
 {
+	// Thread-safe check and insert
+	std::lock_guard<std::mutex> lock(m_ResourceMapMutex);
+
 	TResourcePointerMap::iterator itor = m_pResMap.find(dwFileCRC);
 
 	if (m_pResMap.end() != itor)
@@ -528,12 +580,36 @@ void CResourceManager::ReserveDeletingResource(CResource * pResource)
 }
 
 CResourceManager::CResourceManager()
+	: m_pLoaderThreadPool(nullptr)
+	, m_pTextureCache(nullptr)
 {
 	ms_loadingThread.Create(0);
+
+	m_pLoaderThreadPool = new CFileLoaderThreadPool();
+	if (!m_pLoaderThreadPool->Initialize())
+	{
+		TraceError("CResourceManager: Failed to initialize FileLoaderThreadPool");
+		delete m_pLoaderThreadPool;
+		m_pLoaderThreadPool = nullptr;
+	}
+
+	m_pTextureCache = new CTextureCache(512);
 }
 
 CResourceManager::~CResourceManager()
 {
 	Destroy();
 	ms_loadingThread.Shutdown();
+
+	if (m_pLoaderThreadPool)
+	{
+		delete m_pLoaderThreadPool;
+		m_pLoaderThreadPool = nullptr;
+	}
+
+	if (m_pTextureCache)
+	{
+		delete m_pTextureCache;
+		m_pTextureCache = nullptr;
+	}
 }

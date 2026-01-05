@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "GrpImage.h"
+#include "DecodedImageData.h"
 
 CGraphicImage::CGraphicImage(const char * c_szFileName, DWORD dwFilter) : 
 CResource(c_szFileName),
@@ -70,6 +71,23 @@ bool CGraphicImage::OnLoad(int iSize, const void * c_pvBuf)
 
 	// 특정 컴퓨터에서 Unknown으로 '안'하면 튕기는 현상이 있음-_-; -비엽
 	if (!m_imageTexture.CreateFromMemoryFile(iSize, c_pvBuf, D3DFMT_UNKNOWN, m_dwFilter))
+		return false;
+
+	m_rect.left = 0;
+	m_rect.top = 0;
+	m_rect.right = m_imageTexture.GetWidth();
+	m_rect.bottom = m_imageTexture.GetHeight();
+	return true;
+}
+
+bool CGraphicImage::OnLoadFromDecodedData(const TDecodedImageData& decodedImage)
+{
+	if (!decodedImage.IsValid())
+		return false;
+
+	m_imageTexture.SetFileName(CResource::GetFileName());
+
+	if (!m_imageTexture.CreateFromDecodedData(decodedImage, D3DFMT_UNKNOWN, m_dwFilter))
 		return false;
 
 	m_rect.left = 0;

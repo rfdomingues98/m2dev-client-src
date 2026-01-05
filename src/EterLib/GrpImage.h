@@ -5,6 +5,8 @@
 #include "Resource.h"
 #include "GrpImageTexture.h"
 
+struct TDecodedImageData;
+
 class CGraphicImage : public CResource
 {
 	public:
@@ -27,6 +29,8 @@ class CGraphicImage : public CResource
 
 		const CGraphicTexture & GetTextureReference() const;
 		CGraphicTexture * GetTexturePointer();
+
+		bool OnLoadFromDecodedData(const TDecodedImageData& decodedImage);
 
 	protected:
 		bool OnLoad(int iSize, const void * c_pvBuf);

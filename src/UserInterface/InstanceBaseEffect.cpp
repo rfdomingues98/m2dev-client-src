@@ -1056,40 +1056,81 @@ void CInstanceBase::__DetachEffect(DWORD dwEID)
 
 DWORD CInstanceBase::__AttachEffect(UINT eEftType)
 {
-	// 2004.07.17.levites.isShow를 ViewFrustumCheck로 변경
-	if (IsAffect(AFFECT_INVISIBILITY))
-		return 0;
-
-	if (eEftType>=EFFECT_NUM)
+	if (eEftType >= EFFECT_NUM)
 		return 0;
 
 	if (ms_astAffectEffectAttachBone[eEftType].empty())
 	{
-		return m_GraphicThingInstance.AttachEffectByID(0, NULL, ms_adwCRCAffectEffect[eEftType]);
+		DWORD dwEftID = m_GraphicThingInstance.AttachEffectByID(0, NULL, ms_adwCRCAffectEffect[eEftType]);
+		
+		// MR-7: Recover affect visual effects when coming out of invisibility
+		if (dwEftID && IsAffect(AFFECT_INVISIBILITY))
+		{
+			CEffectManager::Instance().SelectEffectInstance(dwEftID);
+			CEffectManager::Instance().HideEffect();
+			CEffectManager::Instance().ApplyAlwaysHidden();
+		}
+
+		return dwEftID;
+		// MR-7: -- END OF -- Recover affect visual effects when coming out of invisibility
 	}
 	else
 	{
 		std::string & rstrBoneName = ms_astAffectEffectAttachBone[eEftType];
 		const char * c_szBoneName;
+
 		// 양손에 붙일 때 사용한다.
 		// 이런 식의 예외 처리를 해놓은 것은 캐릭터 마다 Equip 의 Bone Name 이 다르기 때문.
 		if (0 == rstrBoneName.compare("PART_WEAPON"))
 		{
 			if (m_GraphicThingInstance.GetAttachingBoneName(CRaceData::PART_WEAPON, &c_szBoneName))
 			{
-				return m_GraphicThingInstance.AttachEffectByID(0, c_szBoneName, ms_adwCRCAffectEffect[eEftType]);
+				// MR-7: Recover affect visual effects when coming out of invisibility
+				DWORD dwEftID = m_GraphicThingInstance.AttachEffectByID(0, c_szBoneName, ms_adwCRCAffectEffect[eEftType]);
+
+				if (dwEftID && IsAffect(AFFECT_INVISIBILITY))
+				{
+					CEffectManager::Instance().SelectEffectInstance(dwEftID);
+					CEffectManager::Instance().HideEffect();
+					CEffectManager::Instance().ApplyAlwaysHidden();
+				}
+
+				return dwEftID;
+				// MR-7: -- END OF -- Recover affect visual effects when coming out of invisibility
 			}
 		}
 		else if (0 == rstrBoneName.compare("PART_WEAPON_LEFT"))
 		{
 			if (m_GraphicThingInstance.GetAttachingBoneName(CRaceData::PART_WEAPON_LEFT, &c_szBoneName))
 			{
-				return m_GraphicThingInstance.AttachEffectByID(0, c_szBoneName, ms_adwCRCAffectEffect[eEftType]);
+				// MR-7: Recover affect visual effects when coming out of invisibility
+				DWORD dwEftID = m_GraphicThingInstance.AttachEffectByID(0, c_szBoneName, ms_adwCRCAffectEffect[eEftType]);
+				
+				if (dwEftID && IsAffect(AFFECT_INVISIBILITY))
+				{
+					CEffectManager::Instance().SelectEffectInstance(dwEftID);
+					CEffectManager::Instance().HideEffect();
+					CEffectManager::Instance().ApplyAlwaysHidden();
+				}
+
+				return dwEftID;
+				// MR-7: -- END OF -- Recover affect visual effects when coming out of invisibility
 			}
 		}
 		else
 		{
-			return m_GraphicThingInstance.AttachEffectByID(0, rstrBoneName.c_str(), ms_adwCRCAffectEffect[eEftType]);
+			// MR-7: Recover affect visual effects when coming out of invisibility
+			DWORD dwEftID = m_GraphicThingInstance.AttachEffectByID(0, rstrBoneName.c_str(), ms_adwCRCAffectEffect[eEftType]);
+
+			if (dwEftID && IsAffect(AFFECT_INVISIBILITY))
+			{
+				CEffectManager::Instance().SelectEffectInstance(dwEftID);
+				CEffectManager::Instance().HideEffect();
+				CEffectManager::Instance().ApplyAlwaysHidden();
+			}
+
+			return dwEftID;
+			// MR-7: -- END OF -- Recover affect visual effects when coming out of invisibility
 		}
 	}
 
